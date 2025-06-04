@@ -564,6 +564,14 @@ if st.sidebar.button("Reset to Default", key="reset_button", help="Reset all par
     st.session_state.noise_cache = defaultdict(dict) 
     st.rerun()
 
+
+
+st.sidebar.header("Analysis Parameters")
+st.session_state.params['distance_threshold'] = st.slider("Distance Threshold (mm)", 0.1, 5.0, st.session_state.params['distance_threshold'], 0.1, key="dt", help="Threshold for Surface DICE and Added Path Length (APL) calculations.")
+st.session_state.params['percentile'] = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, st.session_state.params['percentile'], 0.1, key="perc", help="Percentile used for calculating the robust Hausdorff Distance (e.g., HD95).")
+st.session_state.params['num_points'] = st.slider("Sample Points per Contour", 10, 500, st.session_state.params['num_points'], 10, key="npts", help="Number of points to sample along each contour surface for surface-based metrics and noisy contour generation.")
+    
+
 analyzer = ContourAnalysisApp()
 try:
     current_metrics = analyzer.compute_metrics(st.session_state.params, st.session_state.noise_cache)
@@ -572,12 +580,6 @@ except Exception as e:
     # import traceback
     # st.error(f"Traceback: {traceback.format_exc()}") # Uncomment for debugging
     st.stop() 
-
-st.sidebar.header("Analysis Parameters")
-st.session_state.params['distance_threshold'] = st.slider("Distance Threshold (mm)", 0.1, 5.0, st.session_state.params['distance_threshold'], 0.1, key="dt", help="Threshold for Surface DICE and Added Path Length (APL) calculations.")
-st.session_state.params['percentile'] = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, st.session_state.params['percentile'], 0.1, key="perc", help="Percentile used for calculating the robust Hausdorff Distance (e.g., HD95).")
-st.session_state.params['num_points'] = st.slider("Sample Points per Contour", 10, 500, st.session_state.params['num_points'], 10, key="npts", help="Number of points to sample along each contour surface for surface-based metrics and noisy contour generation.")
-    
     
 st.header("Contour Analysis Visualizations")
 if (st.session_state.params['radius1'] <=0 and st.session_state.params['noise1'] <=0 and st.session_state.params['num_points'] < 2) and \
@@ -613,7 +615,6 @@ else:
         st.error(f"An error occurred during plotting: {e}")
         # import traceback
         # st.error(f"Traceback: {traceback.format_exc()}") # Uncomment for debugging
-
 
 
 st.header("Computed Metrics")
