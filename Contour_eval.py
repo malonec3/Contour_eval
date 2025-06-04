@@ -554,10 +554,6 @@ with st.sidebar.expander("Test Contour (Red)", expanded=True):
     st.session_state.params['radius2'] = st.slider("Radius (C2)", 0.0, 8.0, st.session_state.params['radius2'], 0.1, key="r2", help="Radius of the test contour (if no noise).")
     st.session_state.params['noise2'] = st.slider("Surface Noise (C2)", 0.0, 1.0, st.session_state.params['noise2'], 0.05, key="n2", help="Magnitude of random noise applied to the test contour surface.")
 
-st.sidebar.header("Analysis Parameters")
-st.session_state.params['distance_threshold'] = st.slider("Distance Threshold (mm)", 0.1, 5.0, st.session_state.params['distance_threshold'], 0.1, key="dt", help="Threshold for Surface DICE and Added Path Length (APL) calculations.")
-st.session_state.params['percentile'] = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, st.session_state.params['percentile'], 0.1, key="perc", help="Percentile used for calculating the robust Hausdorff Distance (e.g., HD95).")
-st.session_state.params['num_points'] = st.slider("Sample Points per Contour", 10, 500, st.session_state.params['num_points'], 10, key="npts", help="Number of points to sample along each contour surface for surface-based metrics and noisy contour generation.")
 
 if st.sidebar.button("Reset to Default", key="reset_button", help="Reset all parameters to their initial default values."):
     st.session_state.params = {
@@ -611,6 +607,11 @@ else:
         st.error(f"An error occurred during plotting: {e}")
         # import traceback
         # st.error(f"Traceback: {traceback.format_exc()}") # Uncomment for debugging
+
+st.sidebar.header("Analysis Parameters")
+st.session_state.params['distance_threshold'] = st.slider("Distance Threshold (mm)", 0.1, 5.0, st.session_state.params['distance_threshold'], 0.1, key="dt", help="Threshold for Surface DICE and Added Path Length (APL) calculations.")
+st.session_state.params['percentile'] = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, st.session_state.params['percentile'], 0.1, key="perc", help="Percentile used for calculating the robust Hausdorff Distance (e.g., HD95).")
+st.session_state.params['num_points'] = st.slider("Sample Points per Contour", 10, 500, st.session_state.params['num_points'], 10, key="npts", help="Number of points to sample along each contour surface for surface-based metrics and noisy contour generation.")
 
 
 st.header("Computed Metrics")
