@@ -434,8 +434,8 @@ class ContourAnalysisApp:
                     'blue', lw=1, label='Reference') # Changed to blue for consistency with other plots
 
         if c2_pts is not None and len(c2_pts)>0 and mask is not None and len(mask) == len(c2_pts): 
-            ax.scatter(c2_pts[~mask, 0], c2_pts[~mask, 1], c='green', s=15, alpha=0.7, label='Test (Accepted)')
-            ax.scatter(c2_pts[mask, 0], c2_pts[mask, 1], c='red', s=20, alpha=0.9, label='Test (Needs Edit - APL)')
+            ax.scatter(c2_pts[~mask, 0], c2_pts[~mask, 1], c='green', s=15, alpha=0.7, label='Accepted (in tolerance)')
+            ax.scatter(c2_pts[mask, 0], c2_pts[mask, 1], c='red', s=20, alpha=0.9, label='Added Path Length (Over tolerance/Needs Edit)')
         elif c2_pts is not None and len(c2_pts)>0: 
             ax.scatter(c2_pts[:, 0], c2_pts[:, 1], c='gray', s=15, alpha=0.7, label='Test (mask error)')
 
