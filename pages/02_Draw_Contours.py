@@ -25,12 +25,11 @@ PX_PER_MM = CANVAS_W / MM_SPAN
 GRID      = (256, 256)                   # raster grid for masks/metrics
 RESAMPLE_N = 400                         # perimeter resampling count
 
-# Persist last results (plots only refresh on Go!)
-st.session_state.setdefault("draw_results", None)
-# Persist canvas initial drawing JSON + seed so we can recolor and remount cleanly
-st.session_state.setdefault("single_seed", 0)
-st.session_state.setdefault("canvas_init_json", None)
-st.session_state.setdefault("poly_sig", None)  # geometry signature of polygons we last applied
+# Session state
+st.session_state.setdefault("polys_A", [])          # list of Fabric polygon dicts (committed)
+st.session_state.setdefault("polys_B", [])
+st.session_state.setdefault("canvas_seed", 0)       # bump to force remount when initial_drawing changes
+st.session_state.setdefault("draw_results", None)   # persisted plots
 
 # --------------------------- helpers -----------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
@@ -38,7 +37,7 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
-    # minor grid
+    # minor
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
@@ -53,7 +52,7 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
                      "stroke":"#ebebeb","strokeWidth":1,"selectable":False,"evented":False,
                      "excludeFromExport":True})
         y += step_minor
-    # major grid
+    # major
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
@@ -85,12 +84,37 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return {"objects": objs}
 
+def colorize(obj, contour):
+    """Set fill/stroke + tag."""
+    if contour == "A":
+        fill, stroke = "rgba(0, 0, 255, 0.20)", "blue"
+    else:
+        fill, stroke = "rgba(255, 0, 0, 0.20)", "red"
+    obj["fill"] = fill
+    obj["stroke"] = stroke
+    obj["strokeWidth"] = 2
+    data = obj.get("data", {})
+    data["contour"] = contour
+    obj["data"] = data
+
+def build_initial_json():
+    """Grid + committed A + committed B."""
+    init = grid_objects()
+    objs = init["objects"]
+    for o in st.session_state.polys_A:
+        oo = {k: o[k] for k in o.keys()}
+        colorize(oo, "A")
+        objs.append(oo)
+    for o in st.session_state.polys_B:
+        oo = {k: o[k] for k in o.keys()}
+        colorize(oo, "B")
+        objs.append(oo)
+    return init
+
 def _polygon_points_from_fabric(obj):
-    if obj.get("type") != "polygon":
-        return None
-    pts = obj.get("points")
-    if not pts:
-        return None
+    if obj.get("type") != "polygon": return None
+    pts = obj.get("points"); if_not = pts is None or len(pts) < 3
+    if if_not: return None
     left = float(obj.get("left", 0.0)); top = float(obj.get("top", 0.0))
     sx = float(obj.get("scaleX", 1.0)); sy = float(obj.get("scaleY", 1.0))
     po = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
@@ -103,61 +127,68 @@ def _polygon_points_from_fabric(obj):
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-def extract_polygons(json_data):
-    """Return list of (fabric_obj, Nx2 array) for each polygon in drawing order."""
-    results = []
-    if not json_data:
-        return results
+def commit_new_from_canvas(json_data, target):
+    """
+    Add any polygons that do NOT already have data.contour to A or B.
+    (This keeps committed objects persistent across reruns.)
+    """
+    if not json_data: return 0
+    added = 0
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon":
+        if obj.get("type") != "polygon": continue
+        if obj.get("data", {}).get("contour") in ("A", "B"):
             continue
-        P = _polygon_points_from_fabric(obj)
-        if P is not None and len(P) >= 3:
-            results.append((obj, P))
-    return results
-
-def polys_signature(polys_objs):
-    """Stable signature of the first few polygons (count + coarse geometry)."""
-    sig = []
-    for (_, P) in polys_objs[:4]:
-        # length + rounded sum for stability
-        sig.append((len(P), round(float(P[:,0].sum()+P[:,1].sum()), 3)))
-    return tuple(sig)
-
-def recolor_initial(polys_objs):
-    """Return initial_drawing JSON with grid + recolored polygons (A blue, B red, others grey)."""
-    init = grid_objects()
-    colors = [
-        ("rgba(0, 0, 255, 0.20)", "blue"),        # A
-        ("rgba(255, 0, 0, 0.20)", "red"),         # B
-    ]
-    objs = init["objects"]
-    for i, (obj, _) in enumerate(polys_objs):
-        # copy a lean polygon object
-        poly = {k: obj[k] for k in obj.keys() if k != "data"}
-        if i < 2:
-            fill, stroke = colors[i]
+        # ensure it's a valid polygon
+        if _polygon_points_from_fabric(obj) is None: continue
+        # store a copy and tag it
+        o = {k: obj[k] for k in obj.keys()}
+        colorize(o, target)
+        if target == "A":
+            st.session_state.polys_A.append(o)
         else:
-            fill, stroke = ("rgba(128, 128, 128, 0.15)", "#888888")
-        poly["fill"] = fill
-        poly["stroke"] = stroke
-        poly["strokeWidth"] = 2
-        poly["selectable"] = True
-        poly["evented"] = True
-        objs.append(poly)
-    return init
+            st.session_state.polys_B.append(o)
+        added += 1
+    if added:
+        st.session_state.canvas_seed += 1  # force remount with updated initial_drawing
+    return added
 
-def mask_from_polygon(P, grid_shape):
-    if P is None: return np.zeros(grid_shape, dtype=bool)
+def apply_transforms_from_canvas(json_data):
+    """
+    Overwrite committed A/B lists with the polygons found in the canvas JSON
+    that are tagged as A/B (so move/scale edits persist).
+    """
+    if not json_data: return
+    new_A, new_B = [], []
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "polygon": continue
+        tag = obj.get("data", {}).get("contour")
+        if tag not in ("A", "B"):  # uncommitted scratch polygons – ignore
+            continue
+        o = {k: obj[k] for k in obj.keys()}
+        colorize(o, tag)  # keep colors consistent
+        if tag == "A":
+            new_A.append(o)
+        else:
+            new_B.append(o)
+    st.session_state.polys_A = new_A
+    st.session_state.polys_B = new_B
+    st.session_state.canvas_seed += 1
+
+def mask_from_objs(objs, grid_shape):
+    """Union of all polygon objects -> mask."""
     H, W = grid_shape
-    xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
-    ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
-    rr, cc = skpolygon(ys, xs, shape=(H, W))
     mask = np.zeros((H, W), dtype=bool)
-    mask[rr, cc] = True
-    mask = morphology.binary_closing(mask, morphology.disk(2))
-    mask = ndi.binary_fill_holes(mask)
-    mask = morphology.remove_small_objects(mask, 16)
+    for obj in objs:
+        P = _polygon_points_from_fabric(obj)
+        if P is None: continue
+        xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
+        ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
+        rr, cc = skpolygon(ys, xs, shape=(H, W))
+        mask[rr, cc] = True
+    if mask.any():
+        mask = morphology.binary_closing(mask, morphology.disk(2))
+        mask = ndi.binary_fill_holes(mask)
+        mask = morphology.remove_small_objects(mask, 16)
     return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
@@ -196,36 +227,43 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
 
-# --------------------------- single canvas -----------------------------------
-st.subheader("Draw two closed polygons: first = A (blue), second = B (red)")
-mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
+# --------------------------- single canvas UI --------------------------------
+st.subheader("One canvas. Choose contour, draw, and commit. Transform to edit.")
 
-# 1) use our stored initial_drawing (grid only on very first run)
-if st.session_state.canvas_init_json is None:
-    st.session_state.canvas_init_json = grid_objects()
+mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
+active = st.radio("Active contour", ["A (blue)", "B (red)"], horizontal=True, index=0)
+active_tag = "A" if active.startswith("A") else "B"
+
+# Build initial JSON (grid + committed shapes)
+initial_json = build_initial_json()
 
 canvas = st_canvas(
-    fill_color="rgba(0, 0, 255, 0.20)",     # used while drawing; we'll recolor after
+    fill_color=("rgba(0, 0, 255, 0.20)" if active_tag == "A" else "rgba(255, 0, 0, 0.20)"),
     stroke_width=2,
-    stroke_color="black",
+    stroke_color=("blue" if active_tag == "A" else "red"),
     background_color="white",
     update_streamlit=True,
     height=CANVAS_H, width=CANVAS_W,
     drawing_mode=("polygon" if mode == "Draw" else "transform"),
-    initial_drawing=st.session_state.canvas_init_json,
+    initial_drawing=initial_json,
     display_toolbar=True,
-    key=f"single_canvas_{st.session_state.single_seed}",
+    key=f"single_canvas_{st.session_state.canvas_seed}",
 )
 
-# 2) recolor polygons live -> update stored initial_drawing -> remount if geometry changed
-if canvas.json_data is not None:
-    polys_objs = extract_polygons(canvas.json_data)
-    sig = polys_signature(polys_objs)
-    if sig != st.session_state.poly_sig:
-        st.session_state.poly_sig = sig
-        st.session_state.canvas_init_json = recolor_initial(polys_objs)
-        st.session_state.single_seed += 1
-        st.experimental_rerun()
+cA, cB, cT, cClrA, cClrB = st.columns([1,1,1,1,1])
+if cA.button("Commit to A"):
+    commit_new_from_canvas(canvas.json_data, "A")
+    st.experimental_rerun()
+if cB.button("Commit to B"):
+    commit_new_from_canvas(canvas.json_data, "B")
+    st.experimental_rerun()
+if cT.button("Apply transforms"):
+    apply_transforms_from_canvas(canvas.json_data)
+    st.experimental_rerun()
+if cClrA.button("Clear A"):
+    st.session_state.polys_A = []; st.session_state.canvas_seed += 1; st.experimental_rerun()
+if cClrB.button("Clear B"):
+    st.session_state.polys_B = []; st.session_state.canvas_seed += 1; st.experimental_rerun()
 
 # ----------------------------- controls --------------------------------------
 st.markdown("---")
@@ -240,22 +278,23 @@ if clear:
 
 # --------------------------------- compute on Go ------------------------------
 if go:
-    polys_objs = extract_polygons(canvas.json_data or {})
-    if len(polys_objs) < 2:
+    # Auto-commit any untagged shapes into the currently active contour (nice UX)
+    commit_new_from_canvas(canvas.json_data, active_tag)
+    # Persist transforms if in transform mode
+    apply_transforms_from_canvas(canvas.json_data)
+
+    if not st.session_state.polys_A or not st.session_state.polys_B:
         st.session_state.draw_results = None
-        st.error("Please draw **two** closed polygons in the canvas (first = blue A, second = red B).")
+        st.error("Please commit at least one polygon to **A** and **B**.")
     else:
-        P_A = polys_objs[0][1]  # first
-        P_B = polys_objs[1][1]  # second
-
-        mA = mask_from_polygon(P_A, GRID)
-        mB = mask_from_polygon(P_B, GRID)
-
+        mA = mask_from_objs(st.session_state.polys_A, GRID)
+        mB = mask_from_objs(st.session_state.polys_B, GRID)
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
+
         if len(pA) == 0 or len(pB) == 0:
             st.session_state.draw_results = None
-            st.error("Could not extract a closed boundary from one or both drawings.")
+            st.error("Could not extract a closed boundary from one or both contours.")
         else:
             dA, dB = nn_distances(pA, pB)
             msd  = (np.mean(dA) + np.mean(dB)) / 2
@@ -276,7 +315,8 @@ if go:
 # ------------------------------ render results (persist) ----------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Draw two polygons in the single box (first → blue A, second → red B), then press **Go!**. "
+    st.info("Select **Active contour** (A or B), draw polygon(s), click **Commit to A/B**. "
+            "Use **Transform** and **Apply transforms** to edit. Press **Go!** to compute metrics. "
             "Edits won’t clear the previous plots until you press Go! again.")
 else:
     thr  = res["thr"];   perc = res["perc"]
@@ -286,11 +326,11 @@ else:
     dice = res["dice"];  jacc = res["jacc"]; areaA = res["areaA"]; areaB = res["areaB"]; inter = res["inter"]
     mA   = res["mA"];    mB   = res["mB"]
 
-    c1, c2 = st.columns(2)
-    with c1:
+    c3, c4 = st.columns(2)
+    with c3:
         st.write(f"**DICE (pixel)**: {dice:.3f} | **Jaccard**: {jacc:.3f}")
         st.write(f"**Area A**: {areaA} px | **Area B**: {areaB} px | **Intersection**: {inter} px")
-    with c2:
+    with c4:
         st.write(f"**Surface DICE @ {thr:.1f} mm**: {sdice:.3f}")
         st.write(f"**MSD**: {msd:.2f} mm | **HD{int(perc)}**: {hd95:.2f} mm | **Max HD**: {hdmax:.2f} mm")
 
@@ -340,8 +380,7 @@ else:
     cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
     first = True
     for contour in cs_inter:
-        if len(contour) < 3:
-            continue
+        if len(contour) < 3: continue
         ys, xs = contour[:, 0], contour[:, 1]
         x_mm = (xs / (GRID[1] - 1)) * 20 - 10
         y_mm = (ys / (GRID[0] - 1)) * 20 - 10
