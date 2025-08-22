@@ -284,7 +284,7 @@ if go:
             dice, jacc, areaA, areaB, inter = dice_jaccard_from_masks(mA, mB)
             dA, dB = nn_distances(pA, pB)
             msd = (np.mean(dA) + np.mean(dB)) / 2
-            hd95 = max(np.percentile(dA, perc), np.percentile(dB), initial=0)
+            hd95 = max(float(np.percentile(dA, perc)),float(np.percentile(dB, perc)))
             hdmax = max(np.max(dA), np.max(dB))
             sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
 
@@ -378,3 +378,4 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
