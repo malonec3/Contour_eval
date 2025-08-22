@@ -200,6 +200,7 @@ def dice_jaccard_from_masks(A, B):
 
 # ------------------------------ Canvas sections ------------------------------
 # ------------------------------ Canvas sections ------------------------------
+# ------------------------------ Canvas sections ------------------------------
 def canvas_section(side_key: str, stroke_fill: str):
     st.subheader(f"Contour {side_key}")
     mode = st.radio(f"Mode ({side_key})", ["Draw", "Transform"], index=0, horizontal=True, key=f"mode_{side_key}")
@@ -207,33 +208,34 @@ def canvas_section(side_key: str, stroke_fill: str):
     # Remount key so Reference outline updates instantly after commit/reset
     canvas_key = f"canvas_{side_key}_{st.session_state[f'{side_key}_seed']}"
 
-    init_json = compose_canvas_json(side_key, st.session_state[f"{side_key}_working"])
-
+    # The canvas component's return value is the source of truth for "working" polygons
     canvas = st_canvas(
         fill_color=stroke_fill,
         stroke_width=2,
-        stroke_color=("#1d4ed8" if side_key == "A" else "#dc2626"), # Corrected stroke color for clarity
+        stroke_color=("#1d4ed8" if side_key == "A" else "#dc2626"),
         background_color="white",
-        update_streamlit=True,      # <— IMPORTANT: sync drawings immediately
+        update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=("polygon" if mode == "Draw" else "transform"),
         display_toolbar=True,
-        initial_drawing=init_json,
+        # Pass the current working drawings back to the canvas as its initial state
+        initial_drawing=compose_canvas_json(side_key, st.session_state[f"{side_key}_working"]),
         key=canvas_key,
     )
 
+    # Update session state directly from the canvas return value ---
+    # This is the critical step to ensure state is saved before a button is clicked.
     if canvas.json_data is not None:
         st.session_state[f"{side_key}_working"] = extract_working_polygons(canvas.json_data)
+
 
     cols = st.columns([1.2, 1.4, 1.2, 3])
     with cols[0]:
         if st.button(f"Commit Add ({side_key})", key=f"commit_add_{side_key}"):
             working = polys_from_working_json(st.session_state[f"{side_key}_working"])
-            # <-- FIX: Simplified logic. If there are working polygons, add them all.
             if not working:
                 st.info("Nothing to add.")
             else:
-                # This works whether ref is None or an existing polygon array
                 st.session_state[f"{side_key}_ref"] = apply_add_subtract(
                     st.session_state[f"{side_key}_ref"], working, []
                 )
@@ -244,13 +246,11 @@ def canvas_section(side_key: str, stroke_fill: str):
     with cols[1]:
         if st.button(f"Commit Subtract ({side_key})", key=f"commit_sub_{side_key}"):
             working = polys_from_working_json(st.session_state[f"{side_key}_working"])
-            # <-- FIX: Added guard clause. You can't subtract from nothing.
             if st.session_state[f"{side_key}_ref"] is None:
                 st.warning("Cannot subtract without a Reference. Use 'Commit Add' first.")
             elif not working:
                 st.info("Nothing to subtract.")
             else:
-                # <-- FIX: Simplified logic to subtract all working polygons from the reference.
                 st.session_state[f"{side_key}_ref"] = apply_add_subtract(
                     st.session_state[f"{side_key}_ref"], [], working
                 )
@@ -268,9 +268,7 @@ def canvas_section(side_key: str, stroke_fill: str):
     ref_set = st.session_state[f"{side_key}_ref"] is not None
     n_work = len(polys_from_working_json(st.session_state[f"{side_key}_working"]))
     st.caption(
-        f"Reference: **{'set' if ref_set else 'not set'}** |  Working polygons: **{n_work}**. "
-        "Draw one or more shapes and use **Commit Add/Subtract** to build your reference contour. "
-        "Press **Go!** to compare the two references." # <-- FIX: Simplified instructions
+        f"Reference: **{'set' if ref_set else 'not set'}** | Working polygons: **{n_work}**."
     )
 # Render both sides
 left_col, right_col = st.columns(2)
@@ -291,17 +289,24 @@ def effective_mask_for_side(side_key: str):
     ref = st.session_state[f"{side_key}_ref"]
     working = polys_from_working_json(st.session_state[f"{side_key}_working"])
 
-    # Use reference if present
+    # --- FIX START: This new logic is more intuitive ---
+
+    # Priority 1: If a committed Reference exists, use it.
     if ref is not None:
+        # If there are also working polygons, it's ambiguous. Force user to commit or reset.
+        if working:
+            return None, "You have uncommitted changes. Please 'Commit' or 'Reset' before comparing.", None
         return mask_from_polygon(ref, GRID), None, None
 
-    # Auto-adopt a single working polygon
-    if len(working) == 1:
-        return mask_from_polygon(working[0], GRID), None, working[0]
+    # Priority 2: If there's no Reference, merge all working polygons to form one.
+    if working:
+        # This acts as an implicit "commit" for the comparison.
+        merged_poly = apply_add_subtract(None, working, [])
+        return mask_from_polygon(merged_poly, GRID), None, merged_poly
 
-    if len(working) == 0:
-        return None, "Draw a polygon or set a Reference.", None
-    return None, "Multiple uncommitted polygons detected. Use Commit Add/Subtract, or Reset.", None
+    # Priority 3: If there is no Reference and no working polygon, there's nothing to compare.
+    return None, "Draw a polygon or set a Reference.", None
+    # --- FIX END ---
 
 if go:
     mA, errA, adoptA = effective_mask_for_side("A")
@@ -395,4 +400,5 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
