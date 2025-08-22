@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
 from skimage import measure, morphology, color, util
 
+
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
@@ -45,22 +46,23 @@ with right:
         key="canvasB",
     )
 
+
 def mask_from_canvasimg(img_rgba, grid_shape):
-    """Convert canvas RGBA image to a cleaned binary mask on a fixed grid."""
     if img_rgba is None:
         return None
-    # Normalize to 0..1 then RGB, then threshold any drawn pixel
-    rgb = util.img_as_ubyte(color.rgba2rgb(img_rgba / 255.0))
+    rgb  = util.img_as_ubyte(color.rgba2rgb(img_rgba / 255.0))
     gray = np.mean(rgb, axis=2)
-    mask = gray > 0  # any non-white pixel
-    # Resize to GRID via nearest
+    mask = gray > 0
+
+    # Resize to processing grid (nearest)
     zy = grid_shape[0] / mask.shape[0]
     zx = grid_shape[1] / mask.shape[1]
     mask_small = ndi.zoom(mask.astype(np.uint8), (zy, zx), order=0) > 0
-    # Clean: remove specks, close gaps, fill holes
+
+    # Clean → remove specks, close gaps, fill holes
     mask_small = morphology.remove_small_objects(mask_small, 16)
     mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
-    mask_small = morphology.binary_fill_holes(mask_small)
+    mask_small = ndi.binary_fill_holes(mask_small)   # <-- fixed line
     return mask_small
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
@@ -196,3 +198,4 @@ if go:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
