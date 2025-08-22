@@ -8,29 +8,29 @@ from scipy import ndimage as ndi
 from skimage import measure, morphology
 from skimage.draw import polygon as skpolygon
 
-# ------------------------------------------------------------------
-# Page setup
-# ------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Page setup / persistent results
+# -----------------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# Persist last computed results so plots don't vanish on rerun
+# Persist the last computed plots so they don't disappear on slider/canvas edits
 st.session_state.setdefault("draw_results", None)
 
-# Canvas + processing settings
+# Canvas & processing settings
 CANVAS_W = 300
 CANVAS_H = 300
-GRID = (256, 256)       # raster grid for masks
-RESAMPLE_N = 400        # perimeter resampling count
-MM_SPAN = 20.0          # world is [-10, +10] mm in both axes
+MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
 PX_PER_MM = CANVAS_W / MM_SPAN
 
-# ------------------------------------------------------------------
-# Build non-selectable grid + 10 mm scale as Fabric objects
-# ------------------------------------------------------------------
+GRID = (256, 256)                   # raster grid for masks
+RESAMPLE_N = 400                    # perimeter resampling count
+
+# -----------------------------------------------------------------------------
+# Grid + 10 mm scale as Fabric objects (non-selectable and ignored by extractor)
+# -----------------------------------------------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
-    """Return Fabric objects (lines/rect) for a light grid and 10 mm scale bar.
-       These are non-selectable and ignored by our polygon extractor."""
+    """Fabric objects for a light grid and a 10 mm scale bar."""
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
@@ -79,45 +79,13 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
 
 GRID_OBJS = grid_objects()
 
-# ------------------------------------------------------------------
-# Two canvases, side by side, each with grid + scale
-# ------------------------------------------------------------------
-left, right = st.columns(2)
-with left:
-    st.subheader("Contour A")
-    canvasA = st_canvas(
-        fill_color="rgba(0, 0, 255, 0.2)",
-        stroke_width=2,
-        stroke_color="blue",
-        background_color="white",
-        update_streamlit=True,               # push json on mouse-up
-        height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="polygon",              # polygon ensures closed loops
-        initial_drawing={"objects": GRID_OBJS},
-        display_toolbar=True,
-        key="canvasA",
-    )
-
-with right:
-    st.subheader("Contour B")
-    canvasB = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.2)",
-        stroke_width=2,
-        stroke_color="red",
-        background_color="white",
-        update_streamlit=True,
-        height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="polygon",
-        initial_drawing={"objects": GRID_OBJS},
-        display_toolbar=True,
-        key="canvasB",
-    )
-
-# -------------------------- helpers -----------------------------------------
+# -----------------------------------------------------------------------------
+# Helpers (with corrected Y orientation)
+# -----------------------------------------------------------------------------
 def _polygon_points_from_fabric(obj):
     """
     Convert a Fabric.js polygon object to absolute pixel coordinates.
-    Expects fields: type='polygon', points=[{x,y},...], left, top, scaleX, scaleY, pathOffset={x,y}.
+    Expects: type='polygon', points=[{x,y},...], left, top, scaleX, scaleY, pathOffset={x,y}.
     """
     if obj.get("type") != "polygon":
         return None
@@ -131,6 +99,7 @@ def _polygon_points_from_fabric(obj):
     po     = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
     po_x   = float(po.get("x", 0.0))
     po_y   = float(po.get("y", 0.0))
+
     out = []
     for p in pts:
         x = left + (float(p["x"]) - po_x) * sx
@@ -138,6 +107,7 @@ def _polygon_points_from_fabric(obj):
         out.append((x, y))
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
+
 
 def mask_from_canvas(canvas, grid_shape):
     """
@@ -165,29 +135,30 @@ def mask_from_canvas(canvas, grid_shape):
         mask[rr, cc] = True
 
     if used_polygon:
-        # Clean: close gaps & fill holes
         mask = morphology.binary_closing(mask, morphology.disk(2))
         mask = ndi.binary_fill_holes(mask)
         mask = morphology.remove_small_objects(mask, 16)
         return mask
 
-    # --- Fallback: pixel route (non-white detection) ---
+    # Fallback (pixel)
     img = canvas.image_data
     if img is None:
         return None
-    # mark any pixel that is not almost-white
     nonwhite = np.any(img[:, :, :3] < 250, axis=2)
     zy = H / img.shape[0]
     zx = W / img.shape[1]
     mask_small = ndi.zoom(nonwhite.astype(np.uint8), (zy, zx), order=0) > 0
-    # Clean
     mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
     mask_small = ndi.binary_fill_holes(mask_small)
     mask_small = morphology.remove_small_objects(mask_small, 16)
     return mask_small
 
+
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    """Extract the largest closed contour and resample to n_points, in [-10,10] mm coords."""
+    """
+    Extract largest closed contour and resample to n_points in **mm** using
+    corrected orientation (plot y increases upward).
+    """
     if mask is None or mask.sum() == 0:
         return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
@@ -212,11 +183,12 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
 
-    # Map (row,col)->(x,y) in [-10,10] mm
+    # Map (row, col) -> (x_mm, y_mm) with Y flipped so up is positive
     ys, xs = resampled[:, 0], resampled[:, 1]
     x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-    y_mm = (ys / (GRID[0] - 1)) * 20 - 10
+    y_mm = 10 - (ys / (GRID[0] - 1)) * 20     # <-- corrected flip
     return np.column_stack([x_mm, y_mm])
+
 
 def nn_distances(P, Q):
     """Nearest-neighbor distances both ways."""
@@ -229,6 +201,7 @@ def nn_distances(P, Q):
     dQ = kdP.query(Q, k=1, workers=-1)[0]
     return dP, dQ
 
+
 def dice_jaccard_from_masks(A, B):
     A = A.astype(bool); B = B.astype(bool)
     inter = np.logical_and(A, B).sum()
@@ -238,18 +211,59 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
 
-# ----------------------------- Controls -----------------------------------
+
+# -----------------------------------------------------------------------------
+# Draw/Transform toggle + canvases (side by side)
+# -----------------------------------------------------------------------------
+st.markdown("**Mode**")
+mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
+drawing_mode = "polygon" if mode == "Draw" else "transform"
+
+left, right = st.columns(2)
+with left:
+    st.subheader("Contour A")
+    canvasA = st_canvas(
+        fill_color="rgba(0, 0, 255, 0.20)",
+        stroke_width=2,
+        stroke_color="blue",
+        background_color="white",
+        update_streamlit=True,                 # json pushed on mouse-up
+        height=CANVAS_H, width=CANVAS_W,
+        drawing_mode=drawing_mode,             # Draw / Transform
+        initial_drawing={"objects": GRID_OBJS},
+        display_toolbar=True,
+        key="canvasA",
+    )
+
+with right:
+    st.subheader("Contour B")
+    canvasB = st_canvas(
+        fill_color="rgba(255, 0, 0, 0.20)",
+        stroke_width=2,
+        stroke_color="red",
+        background_color="white",
+        update_streamlit=True,
+        height=CANVAS_H, width=CANVAS_W,
+        drawing_mode=drawing_mode,
+        initial_drawing={"objects": GRID_OBJS},
+        display_toolbar=True,
+        key="canvasB",
+    )
+
+# -----------------------------------------------------------------------------
+# Controls
+# -----------------------------------------------------------------------------
 st.markdown("---")
 thr = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
-cbtn1, cbtn2, _ = st.columns([1,1,6])
-go = cbtn1.button("Go! 🚀")
-clear_plots = cbtn2.button("Clear plots")
-
-if clear_plots:
+c1, c2, _ = st.columns([1,1,6])
+go = c1.button("Go! 🚀")
+if c2.button("Clear plots"):
     st.session_state.draw_results = None
 
-# --------------------------------- Compute on Go --------------------------
+# -----------------------------------------------------------------------------
+# Compute on Go (and persist results)
+# -----------------------------------------------------------------------------
 if go:
     mA = mask_from_canvas(canvasA, GRID)
     mB = mask_from_canvas(canvasB, GRID)
@@ -264,30 +278,27 @@ if go:
             st.session_state.draw_results = None
             st.error("Could not extract a closed boundary from one or both drawings.")
         else:
-            # Volumetric (pixel) metrics on raster masks
             dice, jacc, areaA, areaB, inter = dice_jaccard_from_masks(mA, mB)
-            # Surface distances on perimeter points
             dA, dB = nn_distances(pA, pB)
             msd = (np.mean(dA) + np.mean(dB)) / 2
             hd95 = max(np.percentile(dA, perc), np.percentile(dB, perc))
             hdmax = max(np.max(dA), np.max(dB))
             sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
 
-            # Persist results so plots don't vanish on next rerun
             st.session_state.draw_results = dict(
-                thr=thr, perc=perc,
-                mA=mA, mB=mB,
-                pA=pA, pB=pB,
-                dA=dA, dB=dB,
+                thr=thr, perc=perc, mA=mA, mB=mB,
+                pA=pA, pB=pB, dA=dA, dB=dB,
                 msd=msd, hd95=hd95, hdmax=hdmax, sdice=sdice,
-                dice=dice, jacc=jacc, areaA=areaA, areaB=areaB, inter=inter,
+                dice=dice, jacc=jacc, areaA=areaA, areaB=areaB, inter=inter
             )
 
-# --------------------------------- Render (persisted) ---------------------
+# -----------------------------------------------------------------------------
+# Render persisted results (until next Go)
+# -----------------------------------------------------------------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Draw a closed polygon in each box, then press **Go!**.\n"
-            "Use the toolbar to edit. A light grid and a 10 mm scale bar are shown for reference.")
+    st.info("Draw a closed polygon in each box (use **Draw**). Use **Transform** to tweak it. "
+            "Press **Go!** to compute metrics; plots remain until you press Go again.")
 else:
     thr  = res["thr"];   perc = res["perc"]
     mA   = res["mA"];    mB   = res["mB"]
@@ -296,11 +307,11 @@ else:
     msd  = res["msd"];   hd95 = res["hd95"]; hdmax = res["hdmax"]; sdice = res["sdice"]
     dice = res["dice"];  jacc = res["jacc"]; areaA = res["areaA"]; areaB = res["areaB"]; inter = res["inter"]
 
-    c1, c2 = st.columns(2)
-    with c1:
+    c3, c4 = st.columns(2)
+    with c3:
         st.write(f"**DICE (pixel)**: {dice:.3f} | **Jaccard**: {jacc:.3f}")
         st.write(f"**Area A**: {areaA} px | **Area B**: {areaB} px | **Intersection**: {inter} px")
-    with c2:
+    with c4:
         st.write(f"**Surface DICE @ {thr:.1f} mm**: {sdice:.3f}")
         st.write(f"**MSD**: {msd:.2f} mm | **HD{int(perc)}**: {hd95:.2f} mm | **Max HD**: {hdmax:.2f} mm")
 
@@ -332,9 +343,10 @@ else:
     ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
 
-    # 3) DICE overlap (shade intersection; outlines for A & B)
+    # 3) DICE overlap (shade intersection; outlines for A & B) – with Y flip
     ax = axes[2]
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
+
     # outlines
     for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
         cs = measure.find_contours(mask.astype(float), 0.5)
@@ -342,8 +354,9 @@ else:
             longest = max(cs, key=lambda c: len(c))
             ys, xs = longest[:, 0], longest[:, 1]
             x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-            y_mm = (ys / (GRID[0] - 1)) * 20 - 10
+            y_mm = 10 - (ys / (GRID[0] - 1)) * 20   # <-- corrected flip
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
+
     # shaded intersection
     inter_mask = np.logical_and(mA, mB)
     cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
@@ -353,9 +366,10 @@ else:
             continue
         ys, xs = contour[:, 0], contour[:, 1]
         x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-        y_mm = (ys / (GRID[0] - 1)) * 20 - 10
+        y_mm = 10 - (ys / (GRID[0] - 1)) * 20       # <-- corrected flip
         ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
         first = False
+
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
