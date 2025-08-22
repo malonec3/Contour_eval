@@ -7,7 +7,6 @@ from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
 from skimage import measure, morphology
 from skimage.draw import polygon as skpolygon
-from PIL import Image, ImageDraw, ImageFont
 
 # --------------------------- Page setup --------------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
@@ -16,69 +15,109 @@ st.title("Draw Two Contours and Compare")
 # Canvas + processing settings
 CANVAS_W = 320
 CANVAS_H = 320
-GRID = (256, 256)      # raster grid for masks
-RESAMPLE_N = 400       # perimeter resampling count
+MM_SPAN = 20.0          # we map canvas to [-10, +10] mm
+PX_PER_MM = CANVAS_W / MM_SPAN
+GRID = (256, 256)       # raster grid for masks
+RESAMPLE_N = 400        # perimeter resampling count
 
 # Persist drawings & last results across reruns
-if "draw_A_json" not in st.session_state: st.session_state.draw_A_json = None
-if "draw_B_json" not in st.session_state: st.session_state.draw_B_json = None
+if "draw_A_json" not in st.session_state: st.session_state.draw_A_json = {"objects": []}
+if "draw_B_json" not in st.session_state: st.session_state.draw_B_json = {"objects": []}
 if "draw_results" not in st.session_state: st.session_state.draw_results = None
 
-# ------------------------- Helpers: grid + scale -----------------------------
-def make_grid_background(width=CANVAS_W, height=CANVAS_H,
-                         mm_span=20, major=5, minor=1, margin=8) -> Image.Image:
-    """
-    Build a white background with a metric grid mapped to [-mm_span/2, +mm_span/2] mm.
-    Adds a 10 mm scale bar bottom-left.
-    """
-    px_per_mm = width / mm_span
-    img = Image.new("RGB", (width, height), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
+# ------------------------- Helpers: grid as Fabric objects -------------------
+def grid_objects(width=CANVAS_W, height=CANVAS_H, mm_span=MM_SPAN, major=5, minor=1):
+    """Return a list of non-selectable Fabric objects drawing a metric grid + scale bar."""
+    objs = []
+    step_minor = PX_PER_MM * minor
+    step_major = PX_PER_MM * major
 
-    # minor grid
-    step_minor = px_per_mm * minor
+    # minor verticals
     x = 0.0
-    while x < width:
-        xi = int(round(x))
-        draw.line([(xi, 0), (xi, height)], fill=(235, 235, 235), width=1)
+    while x <= width + 0.5:
+        xi = float(x)
+        objs.append({
+            "type": "line", "x1": xi, "y1": 0.0, "x2": xi, "y2": float(height),
+            "stroke": "#ebebeb", "strokeWidth": 1,
+            "selectable": False, "evented": False, "excludeFromExport": True
+        })
         x += step_minor
+
+    # minor horizontals
     y = 0.0
-    while y < height:
-        yi = int(round(y))
-        draw.line([(0, yi), (width, yi)], fill=(235, 235, 235), width=1)
+    while y <= height + 0.5:
+        yi = float(y)
+        objs.append({
+            "type": "line", "x1": 0.0, "y1": yi, "x2": float(width), "y2": yi,
+            "stroke": "#ebebeb", "strokeWidth": 1,
+            "selectable": False, "evented": False, "excludeFromExport": True
+        })
         y += step_minor
 
-    # major grid (darker)
-    step_major = px_per_mm * major
+    # major verticals
     x = 0.0
-    while x < width:
-        xi = int(round(x))
-        draw.line([(xi, 0), (xi, height)], fill=(210, 210, 210), width=1)
+    while x <= width + 0.5:
+        xi = float(x)
+        objs.append({
+            "type": "line", "x1": xi, "y1": 0.0, "x2": xi, "y2": float(height),
+            "stroke": "#d2d2d2", "strokeWidth": 1,
+            "selectable": False, "evented": False, "excludeFromExport": True
+        })
         x += step_major
+
+    # major horizontals
     y = 0.0
-    while y < height:
-        yi = int(round(y))
-        draw.line([(0, yi), (width, yi)], fill=(210, 210, 210), width=1)
+    while y <= height + 0.5:
+        yi = float(y)
+        objs.append({
+            "type": "line", "x1": 0.0, "y1": yi, "x2": float(width), "y2": yi,
+            "stroke": "#d2d2d2", "strokeWidth": 1,
+            "selectable": False, "evented": False, "excludeFromExport": True
+        })
         y += step_major
 
-    # axes box
-    draw.rectangle([(0, 0), (width-1, height-1)], outline=(200, 200, 200), width=1)
+    # border box
+    objs.append({
+        "type": "rect", "left": 0, "top": 0, "width": float(width), "height": float(height),
+        "fill": "", "stroke": "#c8c8c8", "strokeWidth": 1,
+        "selectable": False, "evented": False, "excludeFromExport": True
+    })
 
-    # scale bar: 10 mm
-    bar_mm = 10
-    bar_px = int(round(bar_mm * px_per_mm))
+    # scale bar: 10 mm at bottom-left
+    bar_mm = 10.0
+    bar_px = float(bar_mm * PX_PER_MM)
+    margin = 10.0
+    y0 = float(height) - margin
     x0 = margin
-    y0 = height - margin - 10
-    draw.line([(x0, y0), (x0 + bar_px, y0)], fill=(0, 0, 0), width=3)
-    # label
-    try:
-        font = ImageFont.load_default()
-        draw.text((x0 + bar_px + 6, y0 - 6), f"{bar_mm} mm", fill=(0, 0, 0), font=font)
-    except Exception:
-        pass
-    return img
+    objs.append({
+        "type": "line", "x1": x0, "y1": y0, "x2": x0 + bar_px, "y2": y0,
+        "stroke": "#000000", "strokeWidth": 3,
+        "selectable": False, "evented": False, "excludeFromExport": True
+    })
+    # two small end caps
+    objs.append({
+        "type": "line", "x1": x0, "y1": y0 - 5, "x2": x0, "y2": y0 + 5,
+        "stroke": "#000000", "strokeWidth": 2,
+        "selectable": False, "evented": False, "excludeFromExport": True
+    })
+    objs.append({
+        "type": "line", "x1": x0 + bar_px, "y1": y0 - 5, "x2": x0 + bar_px, "y2": y0 + 5,
+        "stroke": "#000000", "strokeWidth": 2,
+        "selectable": False, "evented": False, "excludeFromExport": True
+    })
+    return objs
 
-GRID_BG = make_grid_background()
+def compose_initial_json(user_json):
+    """Combine non-selectable grid + user's polygons into a canvas JSON."""
+    user_objs = [o for o in (user_json or {}).get("objects", []) if o.get("type") == "polygon"]
+    return {"objects": grid_objects() + user_objs}
+
+def extract_polygons_only(json_data):
+    """Keep only polygon objects from canvas JSON (drop grid/scale)."""
+    if not json_data:
+        return {"objects": []}
+    polys = [o for o in json_data.get("objects", []) if o.get("type") == "polygon"]
+    return {"objects": polys}
 
 # -------------------------- Vector → mask helpers ----------------------------
 def _polygon_points_from_fabric(obj):
@@ -88,7 +127,6 @@ def _polygon_points_from_fabric(obj):
     pts = obj.get("points") or []
     if not pts:
         return None
-
     left = float(obj.get("left", 0.0))
     top = float(obj.get("top", 0.0))
     sx = float(obj.get("scaleX", 1.0))
@@ -105,41 +143,26 @@ def _polygon_points_from_fabric(obj):
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-def mask_from_canvas(canvas_json, canvas_img, grid_shape):
-    """
-    Prefer union of all polygon objects from JSON. If none, fall back to pixel threshold.
-    """
+def mask_from_canvas_json(canvas_json, grid_shape):
+    """Union of all polygons → raster mask on GRID."""
     H, W = grid_shape
     mask = np.zeros((H, W), dtype=bool)
-    used_json = False
-
-    objects = (canvas_json or {}).get("objects") or []
-    for obj in objects:
+    used = False
+    for obj in (canvas_json or {}).get("objects", []):
         poly = _polygon_points_from_fabric(obj)
         if poly is None:
             continue
-        used_json = True
+        used = True
         xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
         ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
         rr, cc = skpolygon(ys, xs, shape=(H, W))
         mask[rr, cc] = True
-
-    if used_json:
-        mask = morphology.binary_closing(mask, morphology.disk(2))
-        mask = ndi.binary_fill_holes(mask)
-        mask = morphology.remove_small_objects(mask, 16)
-        return mask
-
-    # Fallback: any non-white pixel
-    if canvas_img is None:
+    if not used:
         return None
-    nonwhite = np.any(canvas_img[:, :, :3] < 250, axis=2)
-    zy = H / canvas_img.shape[0]; zx = W / canvas_img.shape[1]
-    mask_small = ndi.zoom(nonwhite.astype(np.uint8), (zy, zx), order=0) > 0
-    mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
-    mask_small = ndi.binary_fill_holes(mask_small)
-    mask_small = morphology.remove_small_objects(mask_small, 16)
-    return mask_small
+    mask = morphology.binary_closing(mask, morphology.disk(2))
+    mask = ndi.binary_fill_holes(mask)
+    mask = morphology.remove_small_objects(mask, 16)
+    return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
     """Largest closed contour → resample to n points → map to [-10,10] mm."""
@@ -193,12 +216,12 @@ with left:
         fill_color="rgba(0, 0, 255, 0.20)",
         stroke_width=2,
         stroke_color="blue",
-        background_image=GRID_BG,      # grid + scale
+        background_color="white",
         update_streamlit=False,        # update only on mouseup
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode="transform",      # start in edit mode; toolbar lets user switch
-        display_toolbar=True,          # users can pick Polygon/Transform/Delete etc.
-        initial_drawing=st.session_state.draw_A_json,  # persist objects across reruns
+        display_toolbar=True,          # Polygon/Transform/Delete available
+        initial_drawing=compose_initial_json(st.session_state.draw_A_json),
         key="canvasA",
     )
 with right:
@@ -207,22 +230,26 @@ with right:
         fill_color="rgba(255, 0, 0, 0.20)",
         stroke_width=2,
         stroke_color="red",
-        background_image=GRID_BG,
+        background_color="white",
         update_streamlit=False,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode="transform",
         display_toolbar=True,
-        initial_drawing=st.session_state.draw_B_json,
+        initial_drawing=compose_initial_json(st.session_state.draw_B_json),
         key="canvasB",
     )
 
-# Keep latest JSON so editing persists even if we don't recompute plots
+# Persist only polygon objects (drop grid) so edits survive but grid doesn’t multiply
 if canvasA.json_data is not None:
-    st.session_state.draw_A_json = canvasA.json_data
+    st.session_state.draw_A_json = extract_polygons_only(canvasA.json_data)
 if canvasB.json_data is not None:
-    st.session_state.draw_B_json = canvasB.json_data
+    st.session_state.draw_B_json = extract_polygons_only(canvasB.json_data)
 
-st.caption("Tip: Use the toolbar to **Polygon** (draw), **Transform** (move/scale/rotate), and **trash** (delete). You can add multiple polygons; we’ll union them on each side.")
+st.caption(
+    "Use the toolbar to **Polygon** (draw), **Transform** (move/scale/rotate), and **trash** (delete). "
+    "You can add multiple polygons; we’ll union them on each side. The grid is 1 mm minor / 5 mm major; "
+    "the scale bar is 10 mm."
+)
 
 # ----------------------------- Controls --------------------------------------
 st.markdown("---")
@@ -238,11 +265,11 @@ if clear_plots:
 
 # ----------------------- Compute ONLY when Go! --------------------------------
 if go:
-    mA = mask_from_canvas(st.session_state.draw_A_json, canvasA.image_data, GRID)
-    mB = mask_from_canvas(st.session_state.draw_B_json, canvasB.image_data, GRID)
+    mA = mask_from_canvas_json(st.session_state.draw_A_json, GRID)
+    mB = mask_from_canvas_json(st.session_state.draw_B_json, GRID)
 
     if mA is None or mA.sum() == 0 or mB is None or mB.sum() == 0:
-        st.error("Both sides must contain at least one closed polygon (or stroke).")
+        st.error("Both sides must contain at least one closed polygon.")
     else:
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
@@ -266,7 +293,8 @@ if go:
 # ----------------------- Show (persisted) plots -------------------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Draw or edit contours, then press **Go!** to compute and render plots. Edits won’t clear the previous plots until you press Go! again.")
+    st.info("Draw or edit contours, then press **Go!** to compute and render plots. "
+            "Edits won’t clear the previous plots until you press Go! again.")
 else:
     thr = res["thr"]; perc = res["perc"]
     pA, pB, dA, dB = res["pA"], res["pB"], res["dA"], res["dB"]
@@ -274,7 +302,6 @@ else:
     dice, jacc, areaA, areaB, inter = res["dice"], res["jacc"], res["areaA"], res["areaB"], res["inter"]
     mA, mB = res["mA"], res["mB"]
 
-    # three plots: Surface DICE @ threshold, distance histogram, DICE overlap
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # 1) Surface DICE @ threshold (A as reference)
@@ -283,13 +310,13 @@ else:
     ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
     ok = dB <= thr
     ax.scatter(pB[ok, 0], pB[ok, 1], c="green", s=12, alpha=0.85, label="B (within tol.)")
-    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red", s=16, alpha=0.9,  label="B (outside tol.)")
+    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red", s=16, alpha=0.9, label="B (outside tol.)")
     ax.text(0.02, 0.98, f"Surface DICE: {sdice:.3f}", transform=ax.transAxes, va="top",
             bbox=dict(boxstyle="round", fc="white", alpha=0.8), fontsize=9)
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
 
-    # 2) Distance distribution (unchanged)
+    # 2) Distance distribution
     ax = axes[1]
     ax.set_title("Surface Distance Distribution", fontweight="bold")
     all_d = np.concatenate([dA, dB])
