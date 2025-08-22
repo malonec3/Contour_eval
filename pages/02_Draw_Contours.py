@@ -9,46 +9,43 @@ from scipy import ndimage as ndi
 from skimage import measure, morphology
 from skimage.draw import polygon as skpolygon
 
-# --------------------------- page --------------------------------------------
+# ================= page =================
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
-
 st.markdown(
     "<style>div[data-testid='column']{padding-left:.25rem;padding-right:.25rem}</style>",
     unsafe_allow_html=True,
 )
 
-# --------------------------- canvas & grid settings ---------------------------
+# =============== constants ===============
 CANVAS_W = 380
 CANVAS_H = 380
-MM_SPAN   = 20.0              # world is [-10, +10] mm in both axes
+MM_SPAN   = 20.0
 PX_PER_MM = CANVAS_W / MM_SPAN
 
-GRID      = (256, 256)        # raster grid for masks/metrics
-RESAMPLE_N = 400              # perimeter resampling count
+GRID      = (256, 256)
+RESAMPLE_N = 400
 
-# Colors used for drawing A/B
-A_FILL,  A_STROKE = "rgba(0, 0, 255, 0.20)", "blue"
-B_FILL,  B_STROKE = "rgba(255, 0, 0, 0.20)", "red"
+A_FILL, A_STROKE = "rgba(0, 0, 255, 0.20)", "blue"
+B_FILL, B_STROKE = "rgba(255, 0, 0, 0.20)", "red"
 
-# --------------------------- state -------------------------------------------
-st.session_state.setdefault("polys_A", [])          # list of Fabric polygon dicts (tagged A)
-st.session_state.setdefault("polys_B", [])          # list of Fabric polygon dicts (tagged B)
-st.session_state.setdefault("canvas_seed", 0)       # bump to force remount only on Reset
-st.session_state.setdefault("draw_results", None)   # persisted plots
+# =============== state ===================
+st.session_state.setdefault("polys_A", [])
+st.session_state.setdefault("polys_B", [])
+st.session_state.setdefault("canvas_seed", 0)      # only increment on Reset
+st.session_state.setdefault("draw_results", None)
 
-# --------------------------- helpers -----------------------------------------
+# =============== helpers =================
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
-    """Fabric objects for grid + 10mm scale bar (non-selectable, non-evented)."""
+    """Fabric objects for grid + 10 mm scale bar (non-selectable)."""
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
 
-    def add_line(x1,y1,x2,y2, color):
+    def add_line(x1, y1, x2, y2, color):
         objs.append({
             "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
-            "stroke":color,"strokeWidth":1,"selectable":False,"evented":False,
-            "excludeFromExport":True
+            "stroke":color,"strokeWidth":1,"selectable":False,"evented":False,"excludeFromExport":True
         })
 
     # minor grid
@@ -70,11 +67,10 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     # border
     objs.append({
         "type":"rect","left":0,"top":0,"width":float(width),"height":float(height),
-        "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,"evented":False,
-        "excludeFromExport":True
+        "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,"evented":False,"excludeFromExport":True
     })
 
-    # 10 mm scale bar (bottom-left)
+    # 10 mm scale bar
     bar_px = 10 * PX_PER_MM; margin = 10.0; y0 = height - margin; x0 = margin
     objs += [
         {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
@@ -89,16 +85,13 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
 GRID_OBJS = grid_objects()
 
 def build_initial_json():
-    """Grid + whatever polygons we’ve already tagged."""
+    # Only used on first mount or after Reset (key changes).
     return {"objects": [*GRID_OBJS, *st.session_state.polys_A, *st.session_state.polys_B]}
 
-def _fabric_polygon_points(obj):
-    """Absolute px coords for a Fabric polygon object (or None)."""
-    if obj.get("type") != "polygon":
-        return None
+def fabric_polygon_points(obj):
+    if obj.get("type") != "polygon": return None
     pts = obj.get("points") or []
-    if len(pts) < 3:
-        return None
+    if len(pts) < 3: return None
     left = float(obj.get("left", 0.0)); top = float(obj.get("top", 0.0))
     sx = float(obj.get("scaleX", 1.0)); sy = float(obj.get("scaleY", 1.0))
     po = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
@@ -110,81 +103,42 @@ def _fabric_polygon_points(obj):
         out.append((x, y))
     return np.array(out, dtype=float)
 
-def color_to_rgb(s):
-    """Parse named/hex/rgb/rgba color to (r,g,b) or None."""
-    if not s: return None
-    s = s.strip().lower()
-    if s == "blue": return (0, 0, 255)
-    if s == "red":  return (255, 0, 0)
-    if s.startswith("#"):
-        h = s[1:]
-        if len(h) == 3: r,g,b = [int(ch*2, 16) for ch in h]
-        elif len(h) == 6: r = int(h[0:2],16); g = int(h[2:4],16); b = int(h[4:6],16)
-        else: return None
-        return (r,g,b)
-    if s.startswith("rgb"):
-        nums = re.findall(r"[\d.]+", s)
-        if len(nums) >= 3:
-            return tuple(int(float(n)) for n in nums[:3])
-    return None
-
-def near_rgb(c, target, tol=80):
-    if c is None: return False
-    dr = c[0]-target[0]; dg = c[1]-target[1]; db = c[2]-target[2]
-    return (dr*dr + dg*dg + db*db) ** 0.5 <= tol
-
-BLUE = (0,0,255); RED = (255,0,0)
-
-def colorize(obj, tag):
-    """Force fill/stroke & tag."""
+def colorize_and_tag(obj, tag):
     if tag == "A":
-        obj["fill"]   = A_FILL
-        obj["stroke"] = A_STROKE
+        obj["fill"]   = A_FILL;  obj["stroke"] = A_STROKE
     else:
-        obj["fill"]   = B_FILL
-        obj["stroke"] = B_STROKE
+        obj["fill"]   = B_FILL;  obj["stroke"] = B_STROKE
     obj["strokeWidth"] = 2
-    data = obj.get("data", {})
-    data["contour"] = tag
-    obj["data"] = data
+    data = obj.get("data", {}) ; data["contour"] = tag ; obj["data"] = data
 
-def tag_polys_from_canvas(json_data, fallback_tag):
+def tag_polys_from_canvas(json_data, active_tag):
     """
-    Go through canvas JSON and ensure every polygon is tagged as A/B.
-    We keep the grid (non-polygons) untouched.
-    - If polygon already has data.contour -> keep it.
-    - Else infer from its stroke/fill color (blue => A, red => B).
-    - If still unclear, use fallback_tag (current active color).
-    Then persist polys_A/polys_B in session_state.
+    Ensure every polygon has data.contour ∈ {A,B}.
+    - Keep existing tags.
+    - If missing, tag to current active side (reliable because the user's drawing color
+      always matches the active contour).
+    Persist tagged lists in session_state.
     """
-    if not json_data:
-        return
+    if not json_data: return
     new_A, new_B = [], []
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon":
-            continue  # ignore grid objects
-
+        if obj.get("type") != "polygon":   # ignore grid lines/rect
+            continue
         tag = obj.get("data", {}).get("contour")
         if tag not in ("A", "B"):
-            rgb = color_to_rgb(obj.get("stroke")) or color_to_rgb(obj.get("fill"))
-            if near_rgb(rgb, BLUE): tag = "A"
-            elif near_rgb(rgb, RED): tag = "B"
-            else: tag = fallback_tag
-            colorize(obj, tag)
-
-        o = {k: obj[k] for k in obj.keys()}  # clean copy
-        colorize(o, tag)
-        (new_A if tag == "A" else new_B).append(o)
-
+            tag = active_tag
+            colorize_and_tag(obj, tag)
+        clean = {k: obj[k] for k in obj.keys()}
+        colorize_and_tag(clean, tag)
+        (new_A if tag == "A" else new_B).append(clean)
     st.session_state.polys_A = new_A
     st.session_state.polys_B = new_B
 
 def mask_from_objs(objs, grid_shape):
-    """Union the polygons into a raster mask."""
     H, W = grid_shape
     mask = np.zeros((H, W), dtype=bool)
     for obj in objs:
-        P = _fabric_polygon_points(obj)
+        P = fabric_polygon_points(obj)
         if P is None: continue
         xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
         ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
@@ -197,8 +151,7 @@ def mask_from_objs(objs, grid_shape):
     return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    if mask is None or mask.sum() == 0:
-        return np.zeros((0, 2))
+    if mask is None or mask.sum() == 0: return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
     if not cs: return np.zeros((0, 2))
     longest = max(cs, key=lambda c: len(c))
@@ -232,24 +185,21 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
 
-# --------------------------- UI: draw/transform -------------------------------
+# =============== UI: canvas ===============
 st.subheader("Draw two polygons in one box (A = blue, B = red). Transform to edit. Press **Go!** to compare.")
 
-mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
+mode   = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
 active = st.radio("Active contour (drawing color)", ["A (blue)", "B (red)"], horizontal=True, index=0)
 active_tag = "A" if active.startswith("A") else "B"
 
-# Build initial JSON (grid + current tagged polygons).
-# IMPORTANT: keep the key stable so the component keeps its internal state;
-# initial_drawing is only used on first mount or after reset.
-initial_json = build_initial_json()
+initial_json = build_initial_json()  # used on first mount (stable key keeps it thereafter)
 
 canvas = st_canvas(
     fill_color=(A_FILL if active_tag == "A" else B_FILL),
     stroke_width=2,
     stroke_color=(A_STROKE if active_tag == "A" else B_STROKE),
     background_color="white",
-    update_streamlit=False,               # prevent flicker; we read json on next rerun (Go/slider/etc.)
+    update_streamlit=True,                 # <-- CRUCIAL: push JSON on mouse-up
     height=CANVAS_H, width=CANVAS_W,
     drawing_mode=("polygon" if mode == "Draw" else "transform"),
     initial_drawing=initial_json,
@@ -257,32 +207,32 @@ canvas = st_canvas(
     key=f"single_canvas_{st.session_state.canvas_seed}",
 )
 
-# On any rerun where json_data is available (e.g., after a button/slider change),
-# tag new polygons and refresh our A/B lists. Grid lines are ignored.
+# Tag new polygons & persist A/B lists (grid objects are ignored)
 if canvas.json_data is not None:
     tag_polys_from_canvas(canvas.json_data, active_tag)
 
 cols = st.columns([1,1,6])
 with cols[0]:
     if st.button("Reset canvas"):
-        st.session_state.polys_A = []; st.session_state.polys_B = []
+        st.session_state.polys_A = []
+        st.session_state.polys_B = []
         st.session_state.draw_results = None
-        st.session_state.canvas_seed += 1
+        st.session_state.canvas_seed += 1  # remount component, reload grid
         st.rerun()
 with cols[1]:
     st.caption("Edits persist; plots update only on **Go!**.")
 
-# ----------------------------- controls --------------------------------------
+# =============== controls =================
 st.markdown("---")
 thr  = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 c1, c2, _ = st.columns([1, 1, 6])
-go = c1.button("Go! 🚀")
+go    = c1.button("Go! 🚀")
 clear = c2.button("Clear plots")
 if clear:
     st.session_state.draw_results = None
 
-# --------------------------------- compute on Go ------------------------------
+# ============= compute on Go ==============
 if go:
     if not st.session_state.polys_A or not st.session_state.polys_B:
         st.session_state.draw_results = None
@@ -312,7 +262,7 @@ if go:
                 mA=mA, mB=mB
             )
 
-# ------------------------------ render results (persist) ----------------------
+# ============== render plots ==============
 res = st.session_state.draw_results
 if res is None:
     st.info("Pick a drawing color (A = blue, B = red). Draw closed polygons. "
@@ -361,11 +311,9 @@ else:
     ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-    # 3) DICE overlap score (shade ONLY the overlap)
+    # 3) DICE overlap (shade intersection only)
     ax = axes[2]
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
-
-    # outlines for A & B
     for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
         cs = measure.find_contours(mask.astype(float), 0.5)
         if cs:
@@ -374,23 +322,18 @@ else:
             x_mm = (xs / (GRID[1] - 1)) * 20 - 10
             y_mm = (ys / (GRID[0] - 1)) * 20 - 10
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
-
-    # shaded intersection
     inter_mask = np.logical_and(mA, mB)
     cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
     first = True
-    for contour in cs_inter:
-        if len(contour) < 3:
-            continue
-        ys, xs = contour[:, 0], contour[:, 1]
+    for c in cs_inter:
+        if len(c) < 3: continue
+        ys, xs = c[:, 0], c[:, 1]
         x_mm = (xs / (GRID[1] - 1)) * 20 - 10
         y_mm = (ys / (GRID[0] - 1)) * 20 - 10
         ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
         first = False
-
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper right")
-
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
