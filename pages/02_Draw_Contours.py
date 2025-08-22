@@ -14,14 +14,15 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# Make buttons larger everywhere
+# Tighten column gap so canvases sit side-by-side (almost touching) + bigger buttons
 st.markdown("""
 <style>
-div.stButton > button {
-  padding: 0.7rem 1.2rem;
-  font-size: 1.05rem;
-  width: 100%;
-}
+/* make columns hug each other */
+[data-testid="stHorizontalBlock"] { gap: 0rem !important; }
+/* optional: slightly reduce spacing under subheaders above canvases */
+h3, h4 { margin-bottom: .25rem !important; }
+/* bigger buttons */
+div.stButton > button { padding: 0.7rem 1.2rem; font-size: 1.05rem; width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,8 +30,8 @@ div.stButton > button {
 st.session_state.setdefault("draw_results", None)
 
 # Canvas & processing settings (BIGGER canvases)
-CANVAS_W = 200
-CANVAS_H = 200
+CANVAS_W = 480
+CANVAS_H = 480
 MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
 PX_PER_MM = CANVAS_W / MM_SPAN
 
@@ -118,11 +119,7 @@ def _polygon_points_from_fabric(obj):
 
 
 def mask_from_canvas(canvas, grid_shape):
-    """
-    Robust mask extraction:
-      1) Prefer vector polygon(s) from canvas.json_data (fast/clean).
-      2) If no polygons found, fallback to pixel threshold from image_data.
-    """
+    """Prefer polygons from JSON; fallback to pixel thresholding."""
     H, W = grid_shape
     mask = np.zeros((H, W), dtype=bool)
 
@@ -161,10 +158,7 @@ def mask_from_canvas(canvas, grid_shape):
 
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    """
-    Extract largest closed contour and resample to n_points in **mm**
-    using corrected orientation (plot y increases upward).
-    """
+    """Resample boundary to n points in **mm** with y flipped upward."""
     if mask is None or mask.sum() == 0:
         return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
@@ -189,10 +183,9 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
 
-    # Map (row, col) -> (x_mm, y_mm) with Y flipped so up is positive
     ys, xs = resampled[:, 0], resampled[:, 1]
     x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-    y_mm = 10 - (ys / (GRID[0] - 1)) * 20     # <-- corrected flip
+    y_mm = 10 - (ys / (GRID[0] - 1)) * 20   # flipped so up is positive
     return np.column_stack([x_mm, y_mm])
 
 
@@ -219,30 +212,33 @@ def dice_jaccard_from_masks(A, B):
 
 
 # -----------------------------------------------------------------------------
-# Draw/Transform toggle + canvases (side by side)
+# Draw/Transform toggle + canvases (side by side, touching)
 # -----------------------------------------------------------------------------
 st.markdown("**Mode**")
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
-left, right = st.columns(2)
-with left:
-    st.subheader("Contour A")
+# headers on one row
+hA, hB = st.columns(2)
+with hA: st.subheader("Contour A")
+with hB: st.subheader("Contour B")
+
+# canvases on the very next row, with 0 gap (thanks to CSS above)
+colA, colB = st.columns(2)
+with colA:
     canvasA = st_canvas(
         fill_color="rgba(0, 0, 255, 0.20)",
         stroke_width=2,
         stroke_color="blue",
         background_color="white",
-        update_streamlit=True,                 # json pushed on mouse-up
+        update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
-        drawing_mode=drawing_mode,             # Draw / Transform
+        drawing_mode=drawing_mode,
         initial_drawing={"objects": GRID_OBJS},
         display_toolbar=True,
         key="canvasA",
     )
-
-with right:
-    st.subheader("Contour B")
+with colB:
     canvasB = st_canvas(
         fill_color="rgba(255, 0, 0, 0.20)",
         stroke_width=2,
@@ -260,8 +256,7 @@ with right:
 # Controls
 # -----------------------------------------------------------------------------
 st.markdown("---")
-# MIN NOW 0.0 (used to be 0.5)
-thr = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)
+thr  = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1,1,6])
@@ -289,7 +284,7 @@ if go:
             dice, jacc, areaA, areaB, inter = dice_jaccard_from_masks(mA, mB)
             dA, dB = nn_distances(pA, pB)
             msd = (np.mean(dA) + np.mean(dB)) / 2
-            hd95 = max(np.percentile(dA, perc), np.percentile(dB, perc))
+            hd95 = max(np.percentile(dA, perc), np.percentile(dB), initial=0)
             hdmax = max(np.max(dA), np.max(dB))
             sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
 
@@ -323,7 +318,6 @@ else:
         st.write(f"**Surface DICE @ {thr:.1f} mm**: {sdice:.3f}")
         st.write(f"**MSD**: {msd:.2f} mm | **HD{int(perc)}**: {hd95:.2f} mm | **Max HD**: {hdmax:.2f} mm")
 
-    # --- Three visuals: Surface DICE @ threshold, Distance histogram, DICE overlap ---
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # 1) Surface DICE @ threshold (A as reference)
@@ -346,42 +340,4 @@ else:
     ax.hist(all_d, bins=bins, alpha=0.7, color="skyblue", edgecolor="black", label="A↔B")
     ax.axvline(msd,  color="red",    linestyle="--", label=f"Mean: {msd:.2f}")
     ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f}")
-    ax.axvline(hdmax,color="purple", linestyle="--", label=f"Max: {hdmax:.2f}")
-    ax.axvline(thr,  color="green",  linestyle="--", label=f"Thresh: {thr:.2f}")
-    ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
-
-    # 3) DICE overlap (shade intersection; outlines for A & B) – with Y flip
-    ax = axes[2]
-    ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
-
-    # outlines
-    for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
-        cs = measure.find_contours(mask.astype(float), 0.5)
-        if cs:
-            longest = max(cs, key=lambda c: len(c))
-            ys, xs = longest[:, 0], longest[:, 1]
-            x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-            y_mm = 10 - (ys / (GRID[0] - 1)) * 20   # <-- corrected flip
-            ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
-
-    # shaded intersection
-    inter_mask = np.logical_and(mA, mB)
-    cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
-    first = True
-    for contour in cs_inter:
-        if len(contour) < 3:
-            continue
-        ys, xs = contour[:, 0], contour[:, 1]
-        x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-        y_mm = 10 - (ys / (GRID[0] - 1)) * 20       # <-- corrected flip
-        ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
-        first = False
-
-    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
-
-    fig.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-
+    ax.axvline(hdmax,color="purple", linestyle="--",
