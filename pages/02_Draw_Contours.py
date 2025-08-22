@@ -26,8 +26,8 @@ if "draw_B_json" not in st.session_state: st.session_state.draw_B_json = {"objec
 if "draw_results" not in st.session_state: st.session_state.draw_results = None
 
 # ------------------------- Helpers: grid as Fabric objects -------------------
-def grid_objects(width=CANVAS_W, height=CANVAS_H, mm_span=MM_SPAN, major=5, minor=1):
-    """Return a list of non-selectable Fabric objects drawing a metric grid + scale bar."""
+def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
+    """Return non-selectable Fabric objects drawing a metric grid + 10 mm scale bar."""
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
@@ -42,7 +42,6 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, mm_span=MM_SPAN, major=5, mino
             "selectable": False, "evented": False, "excludeFromExport": True
         })
         x += step_minor
-
     # minor horizontals
     y = 0.0
     while y <= height + 0.5:
@@ -64,7 +63,6 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, mm_span=MM_SPAN, major=5, mino
             "selectable": False, "evented": False, "excludeFromExport": True
         })
         x += step_major
-
     # major horizontals
     y = 0.0
     while y <= height + 0.5:
@@ -76,44 +74,35 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, mm_span=MM_SPAN, major=5, mino
         })
         y += step_major
 
-    # border box
+    # border
     objs.append({
         "type": "rect", "left": 0, "top": 0, "width": float(width), "height": float(height),
         "fill": "", "stroke": "#c8c8c8", "strokeWidth": 1,
         "selectable": False, "evented": False, "excludeFromExport": True
     })
 
-    # scale bar: 10 mm at bottom-left
-    bar_mm = 10.0
-    bar_px = float(bar_mm * PX_PER_MM)
+    # 10 mm scale bar
+    bar_px = float(10.0 * PX_PER_MM)
     margin = 10.0
     y0 = float(height) - margin
     x0 = margin
-    objs.append({
-        "type": "line", "x1": x0, "y1": y0, "x2": x0 + bar_px, "y2": y0,
-        "stroke": "#000000", "strokeWidth": 3,
-        "selectable": False, "evented": False, "excludeFromExport": True
-    })
-    # two small end caps
-    objs.append({
-        "type": "line", "x1": x0, "y1": y0 - 5, "x2": x0, "y2": y0 + 5,
-        "stroke": "#000000", "strokeWidth": 2,
-        "selectable": False, "evented": False, "excludeFromExport": True
-    })
-    objs.append({
-        "type": "line", "x1": x0 + bar_px, "y1": y0 - 5, "x2": x0 + bar_px, "y2": y0 + 5,
-        "stroke": "#000000", "strokeWidth": 2,
-        "selectable": False, "evented": False, "excludeFromExport": True
-    })
+    objs += [
+        {"type": "line", "x1": x0, "y1": y0, "x2": x0 + bar_px, "y2": y0,
+         "stroke": "#000000", "strokeWidth": 3, "selectable": False, "evented": False, "excludeFromExport": True},
+        {"type": "line", "x1": x0, "y1": y0 - 5, "x2": x0, "y2": y0 + 5,
+         "stroke": "#000000", "strokeWidth": 2, "selectable": False, "evented": False, "excludeFromExport": True},
+        {"type": "line", "x1": x0 + bar_px, "y1": y0 - 5, "x2": x0 + bar_px, "y2": y0 + 5,
+         "stroke": "#000000", "strokeWidth": 2, "selectable": False, "evented": False, "excludeFromExport": True},
+    ]
     return objs
 
 def compose_initial_json(user_json):
-    """Combine non-selectable grid + user's polygons into a canvas JSON."""
+    """Combine grid + user's polygons into a canvas JSON."""
     user_objs = [o for o in (user_json or {}).get("objects", []) if o.get("type") == "polygon"]
     return {"objects": grid_objects() + user_objs}
 
 def extract_polygons_only(json_data):
-    """Keep only polygon objects from canvas JSON (drop grid/scale)."""
+    """Keep only polygon objects (drop grid/scale)."""
     if not json_data:
         return {"objects": []}
     polys = [o for o in json_data.get("objects", []) if o.get("type") == "polygon"]
@@ -121,20 +110,15 @@ def extract_polygons_only(json_data):
 
 # -------------------------- Vector → mask helpers ----------------------------
 def _polygon_points_from_fabric(obj):
-    """Fabric.js polygon → absolute canvas pixels."""
     if obj.get("type") != "polygon":
         return None
     pts = obj.get("points") or []
     if not pts:
         return None
-    left = float(obj.get("left", 0.0))
-    top = float(obj.get("top", 0.0))
-    sx = float(obj.get("scaleX", 1.0))
-    sy = float(obj.get("scaleY", 1.0))
-    po = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
-    po_x = float(po.get("x", 0.0))
-    po_y = float(po.get("y", 0.0))
-
+    left = float(obj.get("left", 0.0));  top  = float(obj.get("top", 0.0))
+    sx   = float(obj.get("scaleX", 1.0)); sy  = float(obj.get("scaleY", 1.0))
+    po   = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
+    po_x = float(po.get("x", 0.0));       po_y = float(po.get("y", 0.0))
     out = []
     for p in pts:
         x = left + (float(p["x"]) - po_x) * sx
@@ -144,38 +128,30 @@ def _polygon_points_from_fabric(obj):
     return arr if len(arr) >= 3 else None
 
 def mask_from_canvas_json(canvas_json, grid_shape):
-    """Union of all polygons → raster mask on GRID."""
     H, W = grid_shape
     mask = np.zeros((H, W), dtype=bool)
     used = False
     for obj in (canvas_json or {}).get("objects", []):
         poly = _polygon_points_from_fabric(obj)
-        if poly is None:
-            continue
+        if poly is None: continue
         used = True
         xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
         ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
         rr, cc = skpolygon(ys, xs, shape=(H, W))
         mask[rr, cc] = True
-    if not used:
-        return None
+    if not used: return None
     mask = morphology.binary_closing(mask, morphology.disk(2))
     mask = ndi.binary_fill_holes(mask)
     mask = morphology.remove_small_objects(mask, 16)
     return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    """Largest closed contour → resample to n points → map to [-10,10] mm."""
-    if mask is None or mask.sum() == 0:
-        return np.zeros((0, 2))
+    if mask is None or mask.sum() == 0: return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
-    if not cs:
-        return np.zeros((0, 2))
+    if not cs: return np.zeros((0, 2))
     longest = max(cs, key=lambda c: len(c))
-    if len(longest) < 3:
-        return np.zeros((0, 2))
-    diffs = np.diff(longest, axis=0)
-    seglen = np.sqrt((diffs**2).sum(1))
+    if len(longest) < 3: return np.zeros((0, 2))
+    diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
     if arclen[-1] == 0: return np.zeros((0, 2))
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
@@ -210,22 +186,26 @@ def dice_jaccard_from_masks(A, B):
 
 # -------------------------- Canvases (editable) ------------------------------
 left, right = st.columns(2)
+
 with left:
     st.subheader("Contour A")
+    modeA = st.radio("Mode (A)", ["Polygon", "Transform"], index=0, horizontal=True, key="modeA")
     canvasA = st_canvas(
         fill_color="rgba(0, 0, 255, 0.20)",
         stroke_width=2,
         stroke_color="blue",
         background_color="white",
-        update_streamlit=False,        # update only on mouseup
+        update_streamlit=False,              # update only on mouseup
         height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="transform",      # start in edit mode; toolbar lets user switch
-        display_toolbar=True,          # Polygon/Transform/Delete available
+        drawing_mode="polygon" if modeA == "Polygon" else "transform",
+        display_toolbar=True,                # download/undo/redo/clear
         initial_drawing=compose_initial_json(st.session_state.draw_A_json),
         key="canvasA",
     )
+
 with right:
     st.subheader("Contour B")
+    modeB = st.radio("Mode (B)", ["Polygon", "Transform"], index=0, horizontal=True, key="modeB")
     canvasB = st_canvas(
         fill_color="rgba(255, 0, 0, 0.20)",
         stroke_width=2,
@@ -233,7 +213,7 @@ with right:
         background_color="white",
         update_streamlit=False,
         height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="transform",
+        drawing_mode="polygon" if modeB == "Polygon" else "transform",
         display_toolbar=True,
         initial_drawing=compose_initial_json(st.session_state.draw_B_json),
         key="canvasB",
@@ -246,9 +226,9 @@ if canvasB.json_data is not None:
     st.session_state.draw_B_json = extract_polygons_only(canvasB.json_data)
 
 st.caption(
-    "Use the toolbar to **Polygon** (draw), **Transform** (move/scale/rotate), and **trash** (delete). "
-    "You can add multiple polygons; we’ll union them on each side. The grid is 1 mm minor / 5 mm major; "
-    "the scale bar is 10 mm."
+    "Use the **Mode** toggle above each canvas: **Polygon** to draw, **Transform** to move/scale/rotate. "
+    "The small icons below the canvas are the built-in toolbar (download / undo / redo / clear). "
+    "You can add multiple polygons; we’ll union them on each side. Grid: 1 mm minor / 5 mm major; scale bar: 10 mm."
 )
 
 # ----------------------------- Controls --------------------------------------
@@ -259,7 +239,6 @@ perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 cols = st.columns([1,1,6])
 go = cols[0].button("Go! 🚀")
 clear_plots = cols[1].button("Clear plots")
-
 if clear_plots:
     st.session_state.draw_results = None
 
