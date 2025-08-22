@@ -262,6 +262,49 @@ class ContourAnalysisApp:
         return self.metrics
 
     # ------------------------------- PLOTS ----------------------------------
+    def plot_surface_acceptability(self, ax, params):
+        ax.set_title('Surface DICE @ Threshold', fontweight='bold')
+        thr = self.metrics.get('threshold', params['distance_threshold'])
+        c1_pts = self.metrics.get('c1_points')
+        c2_pts = self.metrics.get('c2_points')
+        c2_min_dist = self.metrics.get('c2_min_dist')
+    
+        c2_ok = np.array([False] * len(c2_pts if c2_pts is not None else []))
+        if (c2_min_dist is not None and isinstance(c2_min_dist, np.ndarray) and c2_min_dist.size > 0 and
+            c2_pts is not None and len(c2_min_dist) == len(c2_pts)):
+            c2_ok = c2_min_dist <= thr
+    
+        c1_center = (params['circle1_x'], params['circle1_y'])
+        r1 = params['radius1']
+        r_inner, r_outer = max(r1 - thr, 0), r1 + thr
+    
+        # tolerance band around reference
+        if r1 > 0:
+            ax.add_patch(Circle(c1_center, r_outer, facecolor='lightgreen', alpha=0.25, edgecolor=None, zorder=0,
+                                label=f'Ref. Tol. Band (±{thr:.1f}mm)'))
+            ax.add_patch(Circle(c1_center, r_inner, facecolor='white', alpha=1.00, edgecolor=None, zorder=1))
+    
+        # reference surface
+        if c1_pts is not None and len(c1_pts) > 0:
+            ax.plot(np.append(c1_pts[:, 0], c1_pts[0, 0]), np.append(c1_pts[:, 1], c1_pts[0, 1]),
+                    'blue', lw=1, label='Reference Surface', zorder=2)
+    
+        # test points classified by threshold
+        if c2_pts is not None and len(c2_pts) > 0 and len(c2_ok) == len(c2_pts):
+            ax.scatter(c2_pts[c2_ok, 0],  c2_pts[c2_ok, 1],  c='green', s=15, alpha=0.8, label='Test (Within Tol.)', zorder=3)
+            ax.scatter(c2_pts[~c2_ok, 0], c2_pts[~c2_ok, 1], c='red',   s=20, alpha=0.9, label='Test (Outside Tol.)', zorder=3)
+            ax.plot(np.append(c2_pts[:,0], c2_pts[0,0]), np.append(c2_pts[:,1], c2_pts[0,1]),
+                    color='red', linestyle='--', lw=0.8, alpha=0.7, zorder=2, label='Test Surface Outline')
+        elif c2_pts is not None and len(c2_pts) > 0:
+            ax.scatter(c2_pts[:, 0], c2_pts[:, 1], c='gray', s=15, alpha=0.8, label='Test (accept. error)', zorder=3)
+    
+        ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
+        ax.set_aspect('equal'); ax.set_xlabel('X (mm)'); ax.set_ylabel('Y (mm)')
+        ax.grid(True, alpha=0.3)
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        if by_label:
+            ax.legend(by_label.values(), by_label.keys(), fontsize=8, loc='upper right')
 
     def plot_threshold_visualization(self, ax, params):
         ax.set_title("Surface Distance Analysis", fontweight="bold")
@@ -708,3 +751,4 @@ st.sidebar.download_button(
     mime="text/plain",
     key="export_metrics_btn",
 )
+
