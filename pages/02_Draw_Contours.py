@@ -199,6 +199,7 @@ def dice_jaccard_from_masks(A, B):
     return dice, jacc, int(a), int(b), int(inter)
 
 # ------------------------------ Canvas sections ------------------------------
+# ------------------------------ Canvas sections ------------------------------
 def canvas_section(side_key: str, stroke_fill: str):
     st.subheader(f"Contour {side_key}")
     mode = st.radio(f"Mode ({side_key})", ["Draw", "Transform"], index=0, horizontal=True, key=f"mode_{side_key}")
@@ -211,9 +212,9 @@ def canvas_section(side_key: str, stroke_fill: str):
     canvas = st_canvas(
         fill_color=stroke_fill,
         stroke_width=2,
-        stroke_color=("blue" if side_key == "A" else "red"),
+        stroke_color=("#1d4ed8" if side_key == "A" else "#dc2626"), # Corrected stroke color for clarity
         background_color="white",
-        update_streamlit=True,     # <— IMPORTANT: sync drawings immediately
+        update_streamlit=True,      # <— IMPORTANT: sync drawings immediately
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=("polygon" if mode == "Draw" else "transform"),
         display_toolbar=True,
@@ -224,46 +225,38 @@ def canvas_section(side_key: str, stroke_fill: str):
     if canvas.json_data is not None:
         st.session_state[f"{side_key}_working"] = extract_working_polygons(canvas.json_data)
 
-    cols = st.columns([1.2,1.4,1.2,3])
+    cols = st.columns([1.2, 1.4, 1.2, 3])
     with cols[0]:
         if st.button(f"Commit Add ({side_key})", key=f"commit_add_{side_key}"):
             working = polys_from_working_json(st.session_state[f"{side_key}_working"])
-            if st.session_state[f"{side_key}_ref"] is None:
-                if len(working) == 0:
-                    st.warning("Draw a polygon first.")
-                else:
-                    ref, adds = working[0], working[1:]
-                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(ref, adds, [])
+            # <-- FIX: Simplified logic. If there are working polygons, add them all.
+            if not working:
+                st.info("Nothing to add.")
             else:
-                if len(working) == 0:
-                    st.info("Nothing to add.")
-                else:
-                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(
-                        st.session_state[f"{side_key}_ref"], working, []
-                    )
-            st.session_state[f"{side_key}_working"] = {"objects": []}
-            st.session_state[f"{side_key}_seed"] += 1
-            st.rerun()
+                # This works whether ref is None or an existing polygon array
+                st.session_state[f"{side_key}_ref"] = apply_add_subtract(
+                    st.session_state[f"{side_key}_ref"], working, []
+                )
+                st.session_state[f"{side_key}_working"] = {"objects": []}
+                st.session_state[f"{side_key}_seed"] += 1
+                st.rerun()
 
     with cols[1]:
         if st.button(f"Commit Subtract ({side_key})", key=f"commit_sub_{side_key}"):
             working = polys_from_working_json(st.session_state[f"{side_key}_working"])
+            # <-- FIX: Added guard clause. You can't subtract from nothing.
             if st.session_state[f"{side_key}_ref"] is None:
-                if len(working) == 0:
-                    st.warning("Draw a polygon first.")
-                else:
-                    ref, subs = working[0], working[1:]
-                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(ref, [], subs)
+                st.warning("Cannot subtract without a Reference. Use 'Commit Add' first.")
+            elif not working:
+                st.info("Nothing to subtract.")
             else:
-                if len(working) == 0:
-                    st.info("Nothing to subtract.")
-                else:
-                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(
-                        st.session_state[f"{side_key}_ref"], [], working
-                    )
-            st.session_state[f"{side_key}_working"] = {"objects": []}
-            st.session_state[f"{side_key}_seed"] += 1
-            st.rerun()
+                # <-- FIX: Simplified logic to subtract all working polygons from the reference.
+                st.session_state[f"{side_key}_ref"] = apply_add_subtract(
+                    st.session_state[f"{side_key}_ref"], [], working
+                )
+                st.session_state[f"{side_key}_working"] = {"objects": []}
+                st.session_state[f"{side_key}_seed"] += 1
+                st.rerun()
 
     with cols[2]:
         if st.button(f"Reset Reference ({side_key})", key=f"reset_{side_key}"):
@@ -275,12 +268,10 @@ def canvas_section(side_key: str, stroke_fill: str):
     ref_set = st.session_state[f"{side_key}_ref"] is not None
     n_work = len(polys_from_working_json(st.session_state[f"{side_key}_working"]))
     st.caption(
-        f"Reference: **{'set' if ref_set else 'not set'}**  |  Working polygons: **{n_work}**. "
-        "Draw one polygon and press **Go** to use it directly (it will be adopted as the Reference), "
-        "or sculpt the Reference with **Commit Add/Subtract**. Use **Transform** to edit working polygons "
-        "before committing. Grid: 1 mm minor / 5 mm major; scale bar: 10 mm."
+        f"Reference: **{'set' if ref_set else 'not set'}** |  Working polygons: **{n_work}**. "
+        "Draw one or more shapes and use **Commit Add/Subtract** to build your reference contour. "
+        "Press **Go!** to compare the two references." # <-- FIX: Simplified instructions
     )
-
 # Render both sides
 left_col, right_col = st.columns(2)
 with left_col:  canvas_section("A", "rgba(0, 0, 255, 0.20)")
@@ -404,3 +395,4 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
