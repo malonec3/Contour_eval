@@ -29,8 +29,8 @@ div.stButton > button {
 st.session_state.setdefault("draw_results", None)
 
 # Canvas & processing settings (BIGGER canvases)
-CANVAS_W = 480
-CANVAS_H = 480
+CANVAS_W = 200
+CANVAS_H = 200
 MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
 PX_PER_MM = CANVAS_W / MM_SPAN
 
@@ -384,3 +384,4 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
