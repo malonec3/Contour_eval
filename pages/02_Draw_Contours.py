@@ -12,28 +12,31 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# tighten column gutter a bit
+# tighten gutter so canvas + controls sit nicely
 st.markdown(
     """
-    <style>
-    div[data-testid="column"]{padding-left:.25rem;padding-right:.25rem}
-    </style>
+    <style>div[data-testid="column"]{padding-left:.25rem;padding-right:.25rem}</style>
     """,
     unsafe_allow_html=True,
 )
 
 # --------------------------- canvas & grid settings ---------------------------
-CANVAS_W = 300
-CANVAS_H = 300
+CANVAS_W = 360
+CANVAS_H = 360
 MM_SPAN   = 20.0                         # drawing corresponds to [-10, +10] mm
 PX_PER_MM = CANVAS_W / MM_SPAN
 GRID      = (256, 256)                   # raster grid for masks/metrics
 RESAMPLE_N = 400                         # perimeter resampling count
 
-# Persist last results so plots only update on "Go!"
+# Persist last results (plots only refresh on Go!)
 if "draw_results" not in st.session_state:
     st.session_state.draw_results = None
 
+# Remount seed so we can recolor polygons after each draw
+if "single_seed" not in st.session_state:
+    st.session_state.single_seed = 0
+
+# --------------------------- helpers -----------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     """Non-selectable Fabric objects: metric grid + 10 mm scale bar."""
     objs = []
@@ -92,38 +95,6 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return {"objects": objs}
 
-# --------------------------- UI: two canvases close together ------------------
-left, right = st.columns([1, 1], gap="small")
-
-with left:
-    st.subheader("Contour A")
-    canvasA = st_canvas(
-        fill_color="rgba(0, 0, 255, 0.2)",
-        stroke_width=2,
-        stroke_color="blue",
-        background_color="white",
-        update_streamlit=True,             # live JSON; plots still gated by "Go!"
-        height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="polygon",            # polygon ensures closed loop
-        initial_drawing=grid_objects(),    # add grid + scale bar
-        key="canvasA_basic",
-    )
-
-with right:
-    st.subheader("Contour B")
-    canvasB = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.2)",
-        stroke_width=2,
-        stroke_color="red",
-        background_color="white",
-        update_streamlit=True,
-        height=CANVAS_H, width=CANVAS_W,
-        drawing_mode="polygon",
-        initial_drawing=grid_objects(),
-        key="canvasB_basic",
-    )
-
-# -------------------------- helpers ------------------------------------------
 def _polygon_points_from_fabric(obj):
     if obj.get("type") != "polygon":
         return None
@@ -142,42 +113,54 @@ def _polygon_points_from_fabric(obj):
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-def mask_from_canvas(canvas, grid_shape):
-    """Prefer vector polygons; fallback to pixel thresholding if needed."""
-    H, W = grid_shape
-    mask = np.zeros((H, W), dtype=bool)
-
-    jd = canvas.json_data or {}
-    objects = jd.get("objects") or []
-    used_json = False
-
-    for obj in objects:
-        poly = _polygon_points_from_fabric(obj)
-        if poly is None:
+def extract_polygons(json_data):
+    """Return a list of (fabric_obj, Nx2 array) for every polygon in drawing order."""
+    results = []
+    if not json_data:
+        return results
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "polygon":
             continue
-        used_json = True
-        xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
-        ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
-        rr, cc = skpolygon(ys, xs, shape=(H, W))
-        mask[rr, cc] = True
+        P = _polygon_points_from_fabric(obj)
+        if P is not None and len(P) >= 3:
+            results.append((obj, P))
+    return results
 
-    if used_json:
-        mask = morphology.binary_closing(mask, morphology.disk(2))
-        mask = ndi.binary_fill_holes(mask)
-        mask = morphology.remove_small_objects(mask, 16)
-        return mask
+def recolor_initial(polys_objs):
+    """Return initial_drawing JSON with grid + recolored polygons (A blue, B red, others grey)."""
+    init = grid_objects()
+    colors = [
+        ("rgba(0, 0, 255, 0.20)", "blue"),        # first -> A (blue)
+        ("rgba(255, 0, 0, 0.20)", "red"),         # second -> B (red)
+    ]
+    objs = init["objects"]
+    for i, (obj, _) in enumerate(polys_objs):
+        # clone a lightweight polygon object for initial_drawing
+        poly = {k: obj[k] for k in obj.keys() if k != "data"}
+        if i < 2:
+            fill, stroke = colors[i]
+        else:
+            fill, stroke = ("rgba(128, 128, 128, 0.15)", "#888888")
+        poly["fill"] = fill
+        poly["stroke"] = stroke
+        poly["strokeWidth"] = 2
+        poly["selectable"] = True
+        poly["evented"] = True
+        objs.append(poly)
+    return init
 
-    # fallback (rare)
-    img = canvas.image_data
-    if img is None:
-        return None
-    nonwhite = np.any(img[:, :, :3] < 250, axis=2)
-    zy = H / img.shape[0]; zx = W / img.shape[1]
-    mask_small = ndi.zoom(nonwhite.astype(np.uint8), (zy, zx), order=0) > 0
-    mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
-    mask_small = ndi.binary_fill_holes(mask_small)
-    mask_small = morphology.remove_small_objects(mask_small, 16)
-    return mask_small
+def mask_from_polygon(P, grid_shape):
+    if P is None: return np.zeros(grid_shape, dtype=bool)
+    H, W = grid_shape
+    xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
+    ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
+    rr, cc = skpolygon(ys, xs, shape=(H, W))
+    mask = np.zeros((H, W), dtype=bool)
+    mask[rr, cc] = True
+    mask = morphology.binary_closing(mask, morphology.disk(2))
+    mask = ndi.binary_fill_holes(mask)
+    mask = morphology.remove_small_objects(mask, 16)
+    return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
     if mask is None or mask.sum() == 0: return np.zeros((0, 2))
@@ -186,8 +169,7 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
     longest = max(cs, key=lambda c: len(c))
     if len(longest) < 3: return np.zeros((0, 2))
 
-    diffs = np.diff(longest, axis=0)
-    seglen = np.sqrt((diffs**2).sum(1))
+    diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
     if arclen[-1] == 0: return np.zeros((0, 2))
 
@@ -219,6 +201,38 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
 
+# --------------------------- single canvas -----------------------------------
+st.subheader("Draw two closed polygons: first = A (blue), second = B (red)")
+mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
+
+# initial scene (grid; polygons recolored if we already have them)
+init_scene = grid_objects()
+
+canvas = st_canvas(
+    fill_color="rgba(0, 0, 255, 0.20)",     # only used during drawing; we'll recolor after
+    stroke_width=2,
+    stroke_color="black",
+    background_color="white",
+    update_streamlit=True,
+    height=CANVAS_H, width=CANVAS_W,
+    drawing_mode=("polygon" if mode == "Draw" else "transform"),
+    initial_drawing=init_scene,
+    display_toolbar=True,
+    key=f"single_canvas_{st.session_state.single_seed}",
+)
+
+# Recolor live polygons (A blue, B red, others grey) by remounting canvas with new initial_drawing
+if canvas.json_data is not None:
+    polys_objs = extract_polygons(canvas.json_data)
+    # Build a compact signature to avoid infinite reruns
+    color_sig = ("sig", min(len(polys_objs), 3))  # count only; enough for recolor trigger
+    if st.session_state.get("color_sig") != color_sig:
+        st.session_state.color_sig = color_sig
+        new_init = recolor_initial(polys_objs)
+        # remount with colored polygons
+        st.session_state.single_seed += 1
+        st.experimental_rerun()
+
 # ----------------------------- controls --------------------------------------
 st.markdown("---")
 thr  = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
@@ -232,12 +246,16 @@ if clear:
 
 # --------------------------------- compute on Go ------------------------------
 if go:
-    mA = mask_from_canvas(canvasA, GRID)
-    mB = mask_from_canvas(canvasB, GRID)
-
-    if mA is None or mA.sum() == 0 or mB is None or mB.sum() == 0:
-        st.error("Both contours must be drawn and form closed regions.")
+    polys_objs = extract_polygons(canvas.json_data or {})
+    if len(polys_objs) < 2:
+        st.error("Please draw **two** closed polygons in the canvas (first = blue A, second = red B).")
     else:
+        P_A = polys_objs[0][1]  # first
+        P_B = polys_objs[1][1]  # second
+
+        mA = mask_from_polygon(P_A, GRID)
+        mB = mask_from_polygon(P_B, GRID)
+
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
 
@@ -263,7 +281,7 @@ if go:
 # ------------------------------ render results (persist) ----------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Draw contours on the left/right, then press **Go!** to compute and render plots. "
+    st.info("Draw two polygons in the single box (first → blue A, second → red B), then press **Go!**. "
             "Edits won’t clear the previous plots until you press Go! again.")
 else:
     thr  = res["thr"];   perc = res["perc"]
@@ -308,7 +326,7 @@ else:
     ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-    # 3) DICE overlap (shade ONLY the overlap)
+    # 3) DICE overlap score (shade ONLY the overlap)
     ax = axes[2]
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
 
