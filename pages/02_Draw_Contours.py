@@ -340,4 +340,41 @@ else:
     ax.hist(all_d, bins=bins, alpha=0.7, color="skyblue", edgecolor="black", label="A↔B")
     ax.axvline(msd,  color="red",    linestyle="--", label=f"Mean: {msd:.2f}")
     ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f}")
-    ax.axvline(hdmax,color="purple", linestyle="--",
+    ax.axvline(hdmax,color="purple", linestyle="--", label=f"Max: {hdmax:.2f}")
+    ax.axvline(thr,  color="green",  linestyle="--", label=f"Thresh: {thr:.2f}")
+    ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+
+    # 3) DICE overlap with shaded intersection
+    ax = axes[2]
+    ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
+
+    # outlines
+    for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
+        cs = measure.find_contours(mask.astype(float), 0.5)
+        if cs:
+            longest = max(cs, key=lambda c: len(c))
+            ys, xs = longest[:, 0], longest[:, 1]
+            x_mm = (xs / (GRID[1] - 1)) * 20 - 10
+            y_mm = 10 - (ys / (GRID[0] - 1)) * 20
+            ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
+
+    # shaded intersection
+    inter_mask = np.logical_and(mA, mB)
+    cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
+    first = True
+    for contour in cs_inter:
+        if len(contour) < 3:
+            continue
+        ys, xs = contour[:, 0], contour[:, 1]
+        x_mm = (xs / (GRID[1] - 1)) * 20 - 10
+        y_mm = 10 - (ys / (GRID[0] - 1)) * 20
+        ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
+        first = False
+
+    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
+    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
+
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
