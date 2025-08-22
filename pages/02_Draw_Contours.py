@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
-from skimage import measure, morphology, color, util
-
+from skimage import measure, morphology
+from skimage.draw import polygon as skpolygon
 
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
@@ -27,7 +27,7 @@ with left:
         stroke_width=2,
         stroke_color="blue",
         background_color="white",
-        update_streamlit=False,     # less reruns during drawing
+        update_streamlit=False,     # updates json/image on mouseup
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode="polygon",     # polygon ensures closed loops
         key="canvasA",
@@ -46,38 +46,103 @@ with right:
         key="canvasB",
     )
 
+# -------------------------- helpers -----------------------------------------
 
-def mask_from_canvasimg(img_rgba, grid_shape):
-    if img_rgba is None:
+def _polygon_points_from_fabric(obj):
+    """
+    Convert a Fabric.js polygon object to absolute pixel coordinates.
+    Expects fields: type='polygon', points=[{x,y},...], left, top, scaleX, scaleY, pathOffset={x,y}.
+    """
+    if obj.get("type") != "polygon":
         return None
-    rgb  = util.img_as_ubyte(color.rgba2rgb(img_rgba / 255.0))
-    gray = np.mean(rgb, axis=2)
-    mask = gray > 0
 
-    # Resize to processing grid (nearest)
-    zy = grid_shape[0] / mask.shape[0]
-    zx = grid_shape[1] / mask.shape[1]
-    mask_small = ndi.zoom(mask.astype(np.uint8), (zy, zx), order=0) > 0
+    pts = obj.get("points")
+    if not pts:
+        return None
 
-    # Clean → remove specks, close gaps, fill holes
-    mask_small = morphology.remove_small_objects(mask_small, 16)
+    left   = float(obj.get("left", 0.0))
+    top    = float(obj.get("top", 0.0))
+    sx     = float(obj.get("scaleX", 1.0))
+    sy     = float(obj.get("scaleY", 1.0))
+    po     = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
+    po_x   = float(po.get("x", 0.0))
+    po_y   = float(po.get("y", 0.0))
+
+    out = []
+    for p in pts:
+        x = left + (float(p["x"]) - po_x) * sx
+        y = top  + (float(p["y"]) - po_y) * sy
+        out.append((x, y))
+    arr = np.array(out, dtype=float)
+    return arr if len(arr) >= 3 else None
+
+
+def mask_from_canvas(canvas, grid_shape):
+    """
+    Best effort mask extraction:
+      1) Prefer vector polygon(s) from canvas.json_data (robust/fast).
+      2) Fallback to pixel threshold from canvas.image_data (anti-aliased but OK).
+    """
+    H, W = grid_shape
+    mask = np.zeros((H, W), dtype=bool)
+
+    jd = canvas.json_data or {}
+    objects = jd.get("objects") or []
+    used_json = False
+
+    # --- Vector path route (preferred) ---
+    for obj in objects:
+        poly = _polygon_points_from_fabric(obj)
+        if poly is None:
+            continue
+        used_json = True
+
+        # Map canvas px -> GRID idx
+        xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
+        ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
+        rr, cc = skpolygon(ys, xs, shape=(H, W))
+        mask[rr, cc] = True
+
+    if used_json:
+        # Clean: close gaps & fill holes
+        mask = morphology.binary_closing(mask, morphology.disk(2))
+        mask = ndi.binary_fill_holes(mask)
+        mask = morphology.remove_small_objects(mask, 16)
+        return mask
+
+    # --- Fallback: pixel route (non-white detection) ---
+    img = canvas.image_data
+    if img is None:
+        return None
+    # mark any pixel that is not almost-white
+    nonwhite = np.any(img[:, :, :3] < 250, axis=2)
+    zy = H / img.shape[0]
+    zx = W / img.shape[1]
+    mask_small = ndi.zoom(nonwhite.astype(np.uint8), (zy, zx), order=0) > 0
+    # Clean
     mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
-    mask_small = ndi.binary_fill_holes(mask_small)   # <-- fixed line
+    mask_small = ndi.binary_fill_holes(mask_small)
+    mask_small = morphology.remove_small_objects(mask_small, 16)
     return mask_small
 
+
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    """Extract the largest closed contour and resample to n_points in (x_mm, y_mm) on [-10,10]^2."""
+    """Extract the largest closed contour and resample to n_points, in [-10,10] mm coords."""
     if mask is None or mask.sum() == 0:
         return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
     if not cs:
         return np.zeros((0, 2))
     longest = max(cs, key=lambda c: len(c))  # (row, col)
+    if len(longest) < 3:
+        return np.zeros((0, 2))
+
     diffs = np.diff(longest, axis=0)
     seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
     if arclen[-1] == 0:
         return np.zeros((0, 2))
+
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
     resampled = np.zeros((n_points, 2), dtype=float)
     j = 0
@@ -86,11 +151,13 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
             j += 1
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
-    # Map (row,col) -> (x,y) in [-10,10] mm for consistency with main page
+
+    # Map (row,col)->(x,y) in [-10,10] mm
     ys, xs = resampled[:, 0], resampled[:, 1]
     x_mm = (xs / (GRID[1] - 1)) * 20 - 10
     y_mm = (ys / (GRID[0] - 1)) * 20 - 10
     return np.column_stack([x_mm, y_mm])
+
 
 def nn_distances(P, Q):
     """Nearest-neighbor distances both ways."""
@@ -103,6 +170,7 @@ def nn_distances(P, Q):
     dQ = kdP.query(Q, k=1, workers=-1)[0]
     return dP, dQ
 
+
 def dice_jaccard_from_masks(A, B):
     A = A.astype(bool); B = B.astype(bool)
     inter = np.logical_and(A, B).sum()
@@ -112,14 +180,17 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
 
+
+# ----------------------------- UI controls -----------------------------------
 st.markdown("---")
 thr = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 go = st.button("Go! 🚀")
 
+# --------------------------------- main --------------------------------------
 if go:
-    mA = mask_from_canvasimg(canvasA.image_data, GRID)
-    mB = mask_from_canvasimg(canvasB.image_data, GRID)
+    mA = mask_from_canvas(canvasA, GRID)
+    mB = mask_from_canvas(canvasB, GRID)
 
     if mA is None or mA.sum() == 0 or mB is None or mB.sum() == 0:
         st.error("Both contours must be drawn and form closed regions.")
@@ -155,10 +226,7 @@ if go:
     # 1) Tolerance band view (A as reference)
     ax = axes[0]
     ax.set_title("Surface Tolerance Band (A as Reference)", fontweight="bold")
-    # band around A using radius-free approach: scatter A perimeter, scatter B colored by distance
-    # draw A perimeter
     ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
-    # classify B
     ok = dB <= thr
     ax.scatter(pB[ok, 0], pB[ok, 1], c="green", s=12, alpha=0.8, label="B (within tol.)")
     ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red", s=16, alpha=0.9, label="B (outside tol.)")
