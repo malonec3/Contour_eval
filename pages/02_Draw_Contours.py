@@ -17,21 +17,27 @@ CANVAS_W = 320
 CANVAS_H = 320
 MM_SPAN = 20.0           # map canvas to [-10, +10] mm
 PX_PER_MM = CANVAS_W / MM_SPAN
-GRID = (256, 256)        # raster grid for masks / union preview
+GRID = (256, 256)        # raster grid for boolean ops / metrics
 RESAMPLE_N = 400         # perimeter resampling count
 
 # --------------------------- State -------------------------------------------
 def _ensure_side_state(side_key: str):
-    if f"{side_key}_add" not in st.session_state: st.session_state[f"{side_key}_add"] = []   # list of (N,2) px
-    if f"{side_key}_sub" not in st.session_state: st.session_state[f"{side_key}_sub"] = []
-    if f"{side_key}_working" not in st.session_state: st.session_state[f"{side_key}_working"] = {"objects": []}
-    if f"{side_key}_seed" not in st.session_state: st.session_state[f"{side_key}_seed"] = 0  # bump to remount canvas
-    if "draw_results" not in st.session_state: st.session_state.draw_results = None
+    # current reference polygon in canvas pixels (N,2) or None
+    if f"{side_key}_ref" not in st.session_state:
+        st.session_state[f"{side_key}_ref"] = None
+    # working (uncommitted) polygons currently on the canvas (Fabric JSON)
+    if f"{side_key}_working" not in st.session_state:
+        st.session_state[f"{side_key}_working"] = {"objects": []}
+    # bump to remount canvas after commit/reset
+    if f"{side_key}_seed" not in st.session_state:
+        st.session_state[f"{side_key}_seed"] = 0
 
 _ensure_side_state("A")
 _ensure_side_state("B")
+if "draw_results" not in st.session_state:
+    st.session_state.draw_results = None
 
-# ------------------------- Grid + committed outlines -------------------------
+# ------------------------- Grid & preview objects ----------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     """Non-selectable Fabric objects: metric grid + 10 mm scale bar."""
     objs = []
@@ -90,10 +96,11 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return objs
 
-def outline_lines_from_polygon(P, color="#1d4ed8", dash=None, width=2, role="committed"):
+def outline_lines_from_polygon(P, color="#1d4ed8", width=3, role="ref"):
     """Convert a polygon (N,2) into Fabric line segments."""
     objs = []
-    if P is None or len(P) < 2: return objs
+    if P is None or len(P) < 2:
+        return objs
     P = np.asarray(P, dtype=float)
     for i in range(len(P)):
         x1, y1 = P[i]
@@ -101,38 +108,18 @@ def outline_lines_from_polygon(P, color="#1d4ed8", dash=None, width=2, role="com
         objs.append({
             "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
             "stroke":color,"strokeWidth":width,
-            "strokeDashArray": dash if dash else None,
             "selectable":False,"evented":False,"excludeFromExport":True,
             "data":{"role":role}
         })
     return objs
 
-def union_outline_objects(add_polys, sub_polys, color="#1d4ed8"):
-    """Compute union(add) - union(sub) on GRID and return an outline as Fabric lines."""
-    mask = mask_from_polylists(add_polys, sub_polys, GRID)
-    if mask.sum() == 0:
-        return []
-    contours = measure.find_contours(mask.astype(float), 0.5)
-    objs = []
-    for c in contours:
-        ys, xs = c[:,0], c[:,1]
-        # map from GRID to canvas px
-        x_px = xs / (GRID[1]-1) * (CANVAS_W-1)
-        y_px = ys / (GRID[0]-1) * (CANVAS_H-1)
-        poly = np.column_stack([x_px, y_px])
-        objs.extend(outline_lines_from_polygon(poly, color=color, width=3, role="preview"))
-    return objs
-
 def compose_canvas_json(side_key: str, working_json):
-    """Grid + committed union preview + current working polygons (editable)."""
-    color_add = "#1d4ed8" if side_key == "A" else "#dc2626"   # blue / red
+    """Grid + Reference outline + current working polygons (editable)."""
+    color_ref = "#1d4ed8" if side_key == "A" else "#dc2626"   # blue / red
     objs = []
     objs += grid_objects()
-    # committed union preview (solid outline)
-    objs += union_outline_objects(st.session_state[f"{side_key}_add"],
-                                  st.session_state[f"{side_key}_sub"],
-                                  color=color_add)
-    # working polygons (filled, editable)
+    objs += outline_lines_from_polygon(st.session_state[f"{side_key}_ref"], color=color_ref, width=3, role="ref")
+    # working polygons (editable)
     if working_json and "objects" in working_json:
         for o in working_json["objects"]:
             if o.get("type") == "polygon":
@@ -144,9 +131,11 @@ def compose_canvas_json(side_key: str, working_json):
 # ---------------------------- JSON <-> polygons ------------------------------
 def _polygon_points_from_fabric(obj):
     """Fabric.js polygon -> absolute canvas pixels."""
-    if obj.get("type") != "polygon": return None
+    if obj.get("type") != "polygon":
+        return None
     pts = obj.get("points") or []
-    if not pts: return None
+    if not pts:
+        return None
     left = float(obj.get("left", 0.0));  top  = float(obj.get("top", 0.0))
     sx   = float(obj.get("scaleX", 1.0)); sy  = float(obj.get("scaleY", 1.0))
     po   = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
@@ -160,8 +149,9 @@ def _polygon_points_from_fabric(obj):
     return arr if len(arr) >= 3 else None
 
 def extract_working_polygons(json_data):
-    """Return a clean working JSON with only user-editable polygons (ignore grid/preview)."""
-    if not json_data: return {"objects": []}
+    """Return a clean working JSON with only user-editable polygons (ignore grid/ref)."""
+    if not json_data:
+        return {"objects": []}
     objs = []
     for o in json_data.get("objects", []):
         if o.get("type") == "polygon" and (o.get("data") is None or o.get("data", {}).get("role") is None):
@@ -177,47 +167,66 @@ def polys_from_working_json(working_json):
             polys.append(P)
     return polys
 
-# ------------------------------- Masks & metrics -----------------------------
-def mask_from_polylists(add_polys, sub_polys, grid_shape):
-    """Raster union(add_polys) minus union(sub_polys) on GRID."""
+# ------------------------------- Boolean ops ---------------------------------
+def mask_from_polygon(P, grid_shape):
+    """Rasterize a single polygon P (canvas px) on GRID."""
+    if P is None:
+        return np.zeros(grid_shape, dtype=bool)
     H, W = grid_shape
+    xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
+    ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
+    rr, cc = skpolygon(ys, xs, shape=(H, W))
     mask = np.zeros((H, W), dtype=bool)
-    # union of adds
-    for P in add_polys:
-        xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
-        ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
-        rr, cc = skpolygon(ys, xs, shape=(H, W))
-        mask[rr, cc] = True
-    # subtract
-    if sub_polys:
-        sub_mask = np.zeros_like(mask)
-        for P in sub_polys:
-            xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
-            ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
-            rr, cc = skpolygon(ys, xs, shape=(H, W))
-            sub_mask[rr, cc] = True
-        mask = np.logical_and(mask, ~sub_mask)
+    mask[rr, cc] = True
+    return mask
 
-    # Clean small artifacts and fill holes
+def poly_from_mask(mask):
+    """Largest contour of mask -> polygon (canvas px)."""
+    if mask is None or mask.sum() == 0:
+        return None
     mask = morphology.binary_closing(mask, morphology.disk(2))
     mask = ndi.binary_fill_holes(mask)
     mask = morphology.remove_small_objects(mask, 16)
-    return mask
-
-def perimeter_points(mask, n_points=RESAMPLE_N):
-    if mask is None or mask.sum() == 0: return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
-    if not cs: return np.zeros((0, 2))
+    if not cs:
+        return None
     longest = max(cs, key=lambda c: len(c))
-    if len(longest) < 3: return np.zeros((0, 2))
+    ys, xs = longest[:, 0], longest[:, 1]
+    x_px = xs / (GRID[1] - 1) * (CANVAS_W - 1)
+    y_px = ys / (GRID[0] - 1) * (CANVAS_H - 1)
+    return np.column_stack([x_px, y_px])
+
+def apply_add_subtract(ref_poly, add_polys, sub_polys):
+    """ref (poly) ⊕ add_polys ⊖ sub_polys -> new ref polygon (poly)."""
+    base = mask_from_polygon(ref_poly, GRID) if ref_poly is not None else np.zeros(GRID, dtype=bool)
+    # add
+    for P in add_polys:
+        base = np.logical_or(base, mask_from_polygon(P, GRID))
+    # subtract
+    for P in sub_polys:
+        base = np.logical_and(base, ~mask_from_polygon(P, GRID))
+    return poly_from_mask(base)
+
+# ------------------------------- Metrics -------------------------------------
+def perimeter_points(mask, n_points=RESAMPLE_N):
+    if mask is None or mask.sum() == 0:
+        return np.zeros((0, 2))
+    cs = measure.find_contours(mask.astype(float), 0.5)
+    if not cs:
+        return np.zeros((0, 2))
+    longest = max(cs, key=lambda c: len(c))
+    if len(longest) < 3:
+        return np.zeros((0, 2))
     diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
-    if arclen[-1] == 0: return np.zeros((0, 2))
+    if arclen[-1] == 0:
+        return np.zeros((0, 2))
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
     resampled = np.zeros((n_points, 2), dtype=float)
     j = 0
     for i, si in enumerate(s):
-        while j < len(arclen) - 1 and arclen[j + 1] < si: j += 1
+        while j < len(arclen) - 1 and arclen[j + 1] < si:
+            j += 1
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
     ys, xs = resampled[:, 0], resampled[:, 1]
@@ -248,11 +257,11 @@ def canvas_section(side_key: str, stroke_fill: str):
     st.subheader(f"Contour {side_key}")
     mode = st.radio(
         f"Mode ({side_key})",
-        ["Draw + (Add)", "Draw − (Subtract)", "Transform"],
+        ["Draw", "Transform"],
         index=0, horizontal=True, key=f"mode_{side_key}"
     )
 
-    # Canvas key with seed => remount on commit/reset so scene reflects committed shapes
+    # Canvas key with seed => remount on commit/reset so scene reflects Reference immediately
     canvas_key = f"canvas_{side_key}_{st.session_state[f'{side_key}_seed']}"
 
     init_json = compose_canvas_json(side_key, st.session_state[f"{side_key}_working"])
@@ -264,7 +273,7 @@ def canvas_section(side_key: str, stroke_fill: str):
         background_color="white",
         update_streamlit=False,
         height=CANVAS_H, width=CANVAS_W,
-        drawing_mode=("polygon" if "Draw" in mode else "transform"),
+        drawing_mode=("polygon" if mode == "Draw" else "transform"),
         display_toolbar=True,
         initial_drawing=init_json,
         key=canvas_key,
@@ -274,37 +283,68 @@ def canvas_section(side_key: str, stroke_fill: str):
     if canvas.json_data is not None:
         st.session_state[f"{side_key}_working"] = extract_working_polygons(canvas.json_data)
 
-    cols = st.columns([1,1,1,3])
+    # Buttons row
+    cols = st.columns([1.2,1.4,1.0,3])
     with cols[0]:
         if st.button(f"Commit Add ({side_key})", key=f"commit_add_{side_key}"):
-            new_polys = polys_from_working_json(st.session_state[f"{side_key}_working"])
-            st.session_state[f"{side_key}_add"].extend(new_polys)
-            st.session_state[f"{side_key}_working"] = {"objects": []}
-            st.session_state[f"{side_key}_seed"] += 1  # force remount to clear working and show preview
-            st.rerun()
+            # adopt first working as reference if none yet
+            working = polys_from_working_json(st.session_state[f"{side_key}_working"])
+            if st.session_state[f"{side_key}_ref"] is None:
+                if len(working) == 0:
+                    st.warning("Draw a polygon first.")
+                else:
+                    ref = working[0]
+                    adds = working[1:]
+                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(ref, adds, [])
+                    st.session_state[f"{side_key}_working"] = {"objects": []}
+                    st.session_state[f"{side_key}_seed"] += 1
+                    st.rerun()
+            else:
+                if len(working) == 0:
+                    st.info("Nothing to add.")
+                else:
+                    new_ref = apply_add_subtract(st.session_state[f"{side_key}_ref"], working, [])
+                    st.session_state[f"{side_key}_ref"] = new_ref
+                    st.session_state[f"{side_key}_working"] = {"objects": []}
+                    st.session_state[f"{side_key}_seed"] += 1
+                    st.rerun()
     with cols[1]:
         if st.button(f"Commit Subtract ({side_key})", key=f"commit_sub_{side_key}"):
-            new_polys = polys_from_working_json(st.session_state[f"{side_key}_working"])
-            st.session_state[f"{side_key}_sub"].extend(new_polys)
-            st.session_state[f"{side_key}_working"] = {"objects": []}
-            st.session_state[f"{side_key}_seed"] += 1
-            st.rerun()
+            working = polys_from_working_json(st.session_state[f"{side_key}_working"])
+            if st.session_state[f"{side_key}_ref"] is None:
+                if len(working) == 0:
+                    st.warning("Draw a polygon first.")
+                else:
+                    # adopt first as reference, subtract any additional ones
+                    ref = working[0]
+                    subs = working[1:]
+                    st.session_state[f"{side_key}_ref"] = apply_add_subtract(ref, [], subs)
+                    st.session_state[f"{side_key}_working"] = {"objects": []}
+                    st.session_state[f"{side_key}_seed"] += 1
+                    st.rerun()
+            else:
+                if len(working) == 0:
+                    st.info("Nothing to subtract.")
+                else:
+                    new_ref = apply_add_subtract(st.session_state[f"{side_key}_ref"], [], working)
+                    st.session_state[f"{side_key}_ref"] = new_ref
+                    st.session_state[f"{side_key}_working"] = {"objects": []}
+                    st.session_state[f"{side_key}_seed"] += 1
+                    st.rerun()
     with cols[2]:
-        if st.button(f"Reset Shape ({side_key})", key=f"reset_{side_key}"):
-            st.session_state[f"{side_key}_add"] = []
-            st.session_state[f"{side_key}_sub"] = []
+        if st.button(f"Reset Reference ({side_key})", key=f"reset_{side_key}"):
+            st.session_state[f"{side_key}_ref"] = None
             st.session_state[f"{side_key}_working"] = {"objects": []}
             st.session_state[f"{side_key}_seed"] += 1
             st.rerun()
 
-    # helpful counters
-    n_add = len(st.session_state[f"{side_key}_add"])
-    n_sub = len(st.session_state[f"{side_key}_sub"])
+    # status line
+    ref_set = st.session_state[f"{side_key}_ref"] is not None
     n_work = len(polys_from_working_json(st.session_state[f"{side_key}_working"]))
     st.caption(
-        f"Committed: **+{n_add}** / **−{n_sub}**  |  Working (not yet committed): **{n_work}**. "
-        "Draw polygons, then **Commit Add** to union them, or **Commit Subtract** to carve them out. "
-        "Use **Transform** to move/scale/rotate working polygons before committing. "
+        f"Reference: **{'set' if ref_set else 'not set'}**  |  Working polygons: **{n_work}**. "
+        "Draw one polygon and press **Go** to use it directly, or sculpt the Reference with "
+        "**Commit Add/Subtract**. Use **Transform** to edit working polygons before committing. "
         "Grid: 1 mm minor / 5 mm major; scale bar: 10 mm."
     )
 
@@ -323,12 +363,30 @@ if clear_col.button("Clear plots"):
     st.session_state.draw_results = None
 
 # ----------------------- Compute ONLY when Go! --------------------------------
-if go:
-    mA = mask_from_polylists(st.session_state["A_add"], st.session_state["A_sub"], GRID)
-    mB = mask_from_polylists(st.session_state["B_add"], st.session_state["B_sub"], GRID)
+def effective_mask_for_side(side_key: str):
+    """Use Reference if set; otherwise accept exactly one working polygon; else error."""
+    ref = st.session_state[f"{side_key}_ref"]
+    working = polys_from_working_json(st.session_state[f"{side_key}_working"])
 
-    if mA.sum() == 0 or mB.sum() == 0:
-        st.error("Both sides must contain at least one committed polygon (after Add/Subtract).")
+    if ref is not None:
+        return mask_from_polygon(ref, GRID), None
+    if len(working) == 1:
+        # auto-adopt single working polygon
+        m = mask_from_polygon(working[0], GRID)
+        return m, None
+    if len(working) == 0:
+        return None, "Draw a polygon or set a Reference."
+    return None, "Multiple uncommitted polygons detected. Use Commit Add/Subtract, or Reset."
+
+if go:
+    mA, errA = effective_mask_for_side("A")
+    mB, errB = effective_mask_for_side("B")
+
+    errs = []
+    if errA: errs.append(f"A: {errA}")
+    if errB: errs.append(f"B: {errB}")
+    if errs:
+        st.error(" / ".join(errs))
     else:
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
@@ -352,7 +410,7 @@ if go:
 # ----------------------- Show (persisted) plots -------------------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Draw or edit contours with **Add/Subtract**, then press **Go!** to compute and render plots. "
+    st.info("Draw or edit contours, then press **Go!** to compute and render plots. "
             "Edits won’t clear the previous plots until you press Go! again.")
 else:
     thr = res["thr"]; perc = res["perc"]
