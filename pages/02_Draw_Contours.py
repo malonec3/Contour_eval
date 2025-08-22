@@ -1,7 +1,6 @@
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
@@ -21,12 +20,7 @@ PX_PER_MM = CANVAS_W / MM_SPAN
 GRID = (256, 256)
 RESAMPLE_N = 400
 
-# --------------------------- State (Simplified) ------------------------------
-if "A_canvas_data" not in st.session_state: st.session_state.A_canvas_data = None
-if "B_canvas_data" not in st.session_state: st.session_state.B_canvas_data = None
-if "draw_results" not in st.session_state: st.session_state.draw_results = None
-
-# ------------------------- Helper Functions (Unchanged) ----------------------
+# ------------------------- Helper Functions ----------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     objs = []
     step_minor = PX_PER_MM * minor; step_major = PX_PER_MM * major
@@ -52,7 +46,9 @@ def _polygon_points_from_fabric(obj):
     if not pts: return None
     left, top = obj.get("left", 0.0), obj.get("top", 0.0)
     sx, sy = obj.get("scaleX", 1.0), obj.get("scaleY", 1.0)
-    out = [(left + p["x"] * sx, top + p["y"] * sy) for p in pts]
+    path_offset_x = obj.get("pathOffset", {}).get("x", 0)
+    path_offset_y = obj.get("pathOffset", {}).get("y", 0)
+    out = [(left + (p["x"] - path_offset_x) * sx, top + (p["y"] - path_offset_y) * sy) for p in pts]
     return np.array(out, dtype=float) if len(out) >= 3 else None
 
 def polys_from_json_data(json_data):
@@ -64,20 +60,18 @@ def polys_from_json_data(json_data):
             if P is not None: polys.append(P)
     return polys
 
-def mask_from_polygon(P, grid_shape):
-    if P is None: return np.zeros(grid_shape, dtype=bool)
-    H,W = grid_shape
-    xs = P[:,0] / (CANVAS_W-1) * (W-1)
-    ys = P[:,1] / (CANVAS_H-1) * (H-1)
-    rr, cc = skpolygon(ys, xs, shape=(H, W))
-    mask = np.zeros((H, W), dtype=bool); mask[rr, cc] = True
-    return mask
-
-def apply_add_subtract(ref_poly, add_polys, sub_polys):
-    base = mask_from_polygon(ref_poly, GRID) if ref_poly is not None else np.zeros(GRID, dtype=bool)
-    for P in add_polys: base = np.logical_or(base, mask_from_polygon(P, GRID))
-    for P in sub_polys: base = np.logical_and(base, ~mask_from_polygon(P, GRID))
-    return base # Return the mask directly
+def mask_from_polygons(polys, grid_shape):
+    if not polys: return np.zeros(grid_shape, dtype=bool)
+    final_mask = np.zeros(grid_shape, dtype=bool)
+    for p in polys:
+        H,W = grid_shape
+        xs = p[:,0] / (CANVAS_W-1) * (W-1)
+        ys = p[:,1] / (CANVAS_H-1) * (H-1)
+        rr, cc = skpolygon(ys, xs, shape=(H, W))
+        temp_mask = np.zeros((H, W), dtype=bool)
+        temp_mask[rr, cc] = True
+        final_mask = np.logical_or(final_mask, temp_mask)
+    return final_mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
     if mask is None or mask.sum() == 0: return np.zeros((0,2))
@@ -105,7 +99,17 @@ def dice_jaccard_from_masks(A, B):
     jacc = inter/union if union>0 else 0.0
     return dice, jacc, int(A.sum()), int(B.sum()), int(inter)
 
-# -------------------------- UI & Main Logic (Simplified) ---------------------
+# --------------------------- State Initialization ----------------------------
+# This is a critical change: Initialize the state with the grid.
+# This ensures the canvas never starts "empty" and loses its state.
+if "A_canvas_data" not in st.session_state:
+    st.session_state.A_canvas_data = {"objects": grid_objects()}
+if "B_canvas_data" not in st.session_state:
+    st.session_state.B_canvas_data = {"objects": grid_objects()}
+if "draw_results" not in st.session_state:
+    st.session_state.draw_results = None
+
+# -------------------------- UI & Main Logic ---------------------------------
 def canvas_section(side_key: str, stroke_fill: str):
     st.subheader(f"Contour {side_key}")
     canvas = st_canvas(
@@ -116,9 +120,13 @@ def canvas_section(side_key: str, stroke_fill: str):
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode="polygon",
-        initial_drawing={"objects": grid_objects()},
+        # CRITICAL: The canvas always displays what's in our session state.
+        initial_drawing=st.session_state[f"{side_key}_canvas_data"],
         key=f"canvas_{side_key}"
     )
+
+    # CRITICAL: If the user draws, the canvas returns its new full state.
+    # We immediately save this new state, overwriting the old one.
     if canvas.json_data is not None:
         st.session_state[f"{side_key}_canvas_data"] = canvas.json_data
 
@@ -129,10 +137,19 @@ with right_col: canvas_section("B", "rgba(255, 0, 0, 0.20)")
 st.markdown("---")
 thr = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
-go_col, clear_col, _ = st.columns([1,1,6])
+
+go_col, clear_plots_col, clear_drawings_col, _ = st.columns([1, 1, 1.5, 5])
 go = go_col.button("Go! 🚀")
-if clear_col.button("Clear plots"):
+
+if clear_plots_col.button("Clear plots"):
     st.session_state.draw_results = None
+    st.rerun()
+
+if clear_drawings_col.button("Clear All Drawings"):
+    st.session_state.A_canvas_data = {"objects": grid_objects()}
+    st.session_state.B_canvas_data = {"objects": grid_objects()}
+    st.session_state.draw_results = None
+    st.rerun()
 
 if go:
     polys_A = polys_from_json_data(st.session_state.A_canvas_data)
@@ -145,54 +162,53 @@ if go:
     if errs:
         st.error(" / ".join(errs))
     else:
-        mA = apply_add_subtract(None, polys_A, [])
-        mB = apply_add_subtract(None, polys_B, [])
-
+        mA = mask_from_polygons(polys_A, GRID)
+        mB = mask_from_polygons(polys_B, GRID)
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
         dA, dB = nn_distances(pA, pB)
-
         msd  = (np.mean(dA) + np.mean(dB)) / 2 if dA.size > 0 and dB.size > 0 else 0
         hd95 = max(np.percentile(dA, perc), np.percentile(dB, perc)) if dA.size > 0 and dB.size > 0 else 0
         hdmax = max(np.max(dA), np.max(dB)) if dA.size > 0 and dB.size > 0 else 0
         sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB)) if (len(pA) + len(pB)) > 0 else 0
         dice, jacc, areaA, areaB, inter = dice_jaccard_from_masks(mA, mB)
-
         st.session_state.draw_results = dict(
-            thr=thr, perc=perc, pA=pA, pB=pB, dA=dA, dB=dB,
-            msd=msd, hd95=hd95, hdmax=hdmax, sdice=sdice,
-            dice=dice, jacc=jacc, areaA=areaA, areaB=areaB, inter=inter,
-            mA=mA, mB=mB,
+            thr=thr, perc=perc, pA=pA, pB=pB, dA=dA, dB=dB, msd=msd,
+            hd95=hd95, hdmax=hdmax, sdice=sdice, dice=dice, jacc=jacc,
+            areaA=areaA, areaB=areaB, inter=inter, mA=mA, mB=mB,
         )
 
-# ----------------------- Plotting (Unchanged) --------------------------------
+# ----------------------- Plotting --------------------------------
 res = st.session_state.draw_results
 if res:
-    # This entire plotting section is the same as your last correct version
-    # ... (Plotting code from previous answer goes here) ...
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    # Plot 1: Surface DICE
     ax = axes[0]
     ax.set_title("Surface DICE @ Threshold", fontweight="bold")
     ax.plot(res["pA"][:,0], res["pA"][:,1], "#1d4ed8", lw=1.5, label="A")
     ok_b = res["dB"] <= res["thr"]
     ax.scatter(res["pB"][ok_b,0], res["pB"][ok_b,1], c="green", s=12, label="B (within tol.)")
     ax.scatter(res["pB"][~ok_b,0], res["pB"][~ok_b,1], c="red", s=16, label="B (outside tol.)")
-    ax.set_aspect("equal"); ax.set_xlim(-10,10); ax.set_ylim(-10,10); ax.grid(True, alpha=0.3); ax.legend()
-
+    ax.set_aspect("equal"); ax.set_xlim(-10,10); ax.set_ylim(-10,10); ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    
+    # Plot 2: Distance Distribution
     ax = axes[1]
     ax.set_title("Surface Distance Distribution", fontweight="bold")
     all_d = np.concatenate([res["dA"], res["dB"]])
     ax.hist(all_d, bins=30, color="skyblue", edgecolor="black")
     ax.axvline(res["msd"], color="red", linestyle="--", label=f"Mean: {res['msd']:.2f}")
     ax.axvline(res["hd95"], color="orange", linestyle="--", label=f"HD{res['perc']:.0f}: {res['hd95']:.2f}")
-    ax.grid(True, alpha=0.3); ax.legend()
-
+    ax.axvline(res["hdmax"], color="purple", linestyle="--", label=f"Max: {res['hdmax']:.2f}")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+    
+    # Plot 3: Volumetric Overlap
     ax = axes[2]
     ax.set_title("Volumetric Overlap (Masks)", fontweight="bold")
-    ax.imshow(res["mA"].T, extent=[-10, 10, -10, 10], origin="lower", cmap="Blues", alpha=0.5)
-    ax.imshow(res["mB"].T, extent=[-10, 10, -10, 10], origin="lower", cmap="Reds", alpha=0.5)
+    ax.imshow(res["mA"].T, extent=[-10, 10, -10, 10], origin="lower", cmap="Blues", alpha=0.5, interpolation="none")
+    ax.imshow(res["mB"].T, extent=[-10, 10, -10, 10], origin="lower", cmap="Reds", alpha=0.5, interpolation="none")
     ax.text(0.02, 0.98, f"DICE: {res['dice']:.3f}\nJaccard: {res['jacc']:.3f}", transform=ax.transAxes, va="top", bbox=dict(boxstyle="round", fc="white", alpha=0.8))
     ax.set_aspect("equal"); ax.set_xlim(-10,10); ax.set_ylim(-10,10); ax.grid(True, alpha=0.3)
-
+    
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
