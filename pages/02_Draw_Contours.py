@@ -15,19 +15,17 @@ st.title("Draw Two Contours and Compare")
 # Canvas + processing settings
 CANVAS_W = 320
 CANVAS_H = 320
-MM_SPAN = 20.0           # we map canvas to [-10, +10] mm
+MM_SPAN = 20.0           # map canvas to [-10, +10] mm
 PX_PER_MM = CANVAS_W / MM_SPAN
-GRID = (256, 256)        # raster grid for masks
+GRID = (256, 256)        # raster grid for masks / union preview
 RESAMPLE_N = 400         # perimeter resampling count
 
 # --------------------------- State -------------------------------------------
 def _ensure_side_state(side_key: str):
-    # committed shapes: lists of polygons, each polygon is ndarray (N,2) in canvas pixels
-    if f"{side_key}_add" not in st.session_state: st.session_state[f"{side_key}_add"] = []
+    if f"{side_key}_add" not in st.session_state: st.session_state[f"{side_key}_add"] = []   # list of (N,2) px
     if f"{side_key}_sub" not in st.session_state: st.session_state[f"{side_key}_sub"] = []
-    # working (uncommitted) polygons currently on the canvas
     if f"{side_key}_working" not in st.session_state: st.session_state[f"{side_key}_working"] = {"objects": []}
-    # last computed results
+    if f"{side_key}_seed" not in st.session_state: st.session_state[f"{side_key}_seed"] = 0  # bump to remount canvas
     if "draw_results" not in st.session_state: st.session_state.draw_results = None
 
 _ensure_side_state("A")
@@ -35,47 +33,47 @@ _ensure_side_state("B")
 
 # ------------------------- Grid + committed outlines -------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
-    """Return non-selectable Fabric objects drawing a metric grid + 10 mm scale bar."""
+    """Non-selectable Fabric objects: metric grid + 10 mm scale bar."""
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
 
-    # minor verticals
+    # minor grid
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
-        objs.append({"type": "line", "x1": xi, "y1": 0.0, "x2": xi, "y2": float(height),
-                     "stroke": "#ebebeb", "strokeWidth": 1, "selectable": False,
-                     "evented": False, "excludeFromExport": True, "data": {"role":"grid"}})
+        objs.append({"type":"line","x1":xi,"y1":0.0,"x2":xi,"y2":float(height),
+                     "stroke":"#ebebeb","strokeWidth":1,"selectable":False,"evented":False,
+                     "excludeFromExport":True,"data":{"role":"grid"}})
         x += step_minor
-    # minor horizontals
     y = 0.0
     while y <= height + 0.5:
         yi = float(y)
-        objs.append({"type": "line", "x1": 0.0, "y1": yi, "x2": float(width), "y2": yi,
-                     "stroke": "#ebebeb", "strokeWidth": 1, "selectable": False,
-                     "evented": False, "excludeFromExport": True, "data": {"role":"grid"}})
+        objs.append({"type":"line","x1":0.0,"y1":yi,"x2":float(width),"y2":yi,
+                     "stroke":"#ebebeb","strokeWidth":1,"selectable":False,"evented":False,
+                     "excludeFromExport":True,"data":{"role":"grid"}})
         y += step_minor
-    # major lines
+
+    # major grid
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
-        objs.append({"type": "line", "x1": xi, "y1": 0.0, "x2": xi, "y2": float(height),
-                     "stroke": "#d2d2d2", "strokeWidth": 1, "selectable": False,
-                     "evented": False, "excludeFromExport": True, "data": {"role":"grid"}})
+        objs.append({"type":"line","x1":xi,"y1":0.0,"x2":xi,"y2":float(height),
+                     "stroke":"#d2d2d2","strokeWidth":1,"selectable":False,"evented":False,
+                     "excludeFromExport":True,"data":{"role":"grid"}})
         x += step_major
     y = 0.0
     while y <= height + 0.5:
         yi = float(y)
-        objs.append({"type": "line", "x1": 0.0, "y1": yi, "x2": float(width), "y2": yi,
-                     "stroke": "#d2d2d2", "strokeWidth": 1, "selectable": False,
-                     "evented": False, "excludeFromExport": True, "data": {"role":"grid"}})
+        objs.append({"type":"line","x1":0.0,"y1":yi,"x2":float(width),"y2":yi,
+                     "stroke":"#d2d2d2","strokeWidth":1,"selectable":False,"evented":False,
+                     "excludeFromExport":True,"data":{"role":"grid"}})
         y += step_major
 
     # border
-    objs.append({"type": "rect", "left": 0, "top": 0, "width": float(width), "height": float(height),
-                 "fill": "", "stroke": "#c8c8c8", "strokeWidth": 1, "selectable": False,
-                 "evented": False, "excludeFromExport": True, "data": {"role":"grid"}})
+    objs.append({"type":"rect","left":0,"top":0,"width":float(width),"height":float(height),
+                 "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,
+                 "evented":False,"excludeFromExport":True,"data":{"role":"grid"}})
 
     # 10 mm scale bar
     bar_px = float(10.0 * PX_PER_MM)
@@ -83,51 +81,61 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     y0 = float(height) - margin
     x0 = margin
     objs += [
-        {"type": "line", "x1": x0, "y1": y0, "x2": x0 + bar_px, "y2": y0,
-         "stroke": "#000000", "strokeWidth": 3, "selectable": False, "evented": False,
-         "excludeFromExport": True, "data": {"role":"grid"}},
-        {"type": "line", "x1": x0, "y1": y0 - 5, "x2": x0, "y2": y0 + 5,
-         "stroke": "#000000", "strokeWidth": 2, "selectable": False, "evented": False,
-         "excludeFromExport": True, "data": {"role":"grid"}},
-        {"type": "line", "x1": x0 + bar_px, "y1": y0 - 5, "x2": x0 + bar_px, "y2": y0 + 5,
-         "stroke": "#000000", "strokeWidth": 2, "selectable": False, "evented": False,
-         "excludeFromExport": True, "data": {"role":"grid"}},
+        {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
+         "selectable":False,"evented":False,"excludeFromExport":True,"data":{"role":"grid"}},
+        {"type":"line","x1":x0,"y1":y0-5,"x2":x0,"y2":y0+5,"stroke":"#000","strokeWidth":2,
+         "selectable":False,"evented":False,"excludeFromExport":True,"data":{"role":"grid"}},
+        {"type":"line","x1":x0+bar_px,"y1":y0-5,"x2":x0+bar_px,"y2":y0+5,"stroke":"#000","strokeWidth":2,
+         "selectable":False,"evented":False,"excludeFromExport":True,"data":{"role":"grid"}},
     ]
     return objs
 
-def outline_objects_from_polygons(polys, color="#1d4ed8", dash=None):
-    """Render each committed polygon as a set of line segments (non-selectable)."""
+def outline_lines_from_polygon(P, color="#1d4ed8", dash=None, width=2, role="committed"):
+    """Convert a polygon (N,2) into Fabric line segments."""
     objs = []
-    for poly in polys:
-        if poly is None or len(poly) < 2:
-            continue
-        P = np.asarray(poly, dtype=float)
-        for i in range(len(P)):
-            x1, y1 = P[i]
-            x2, y2 = P[(i + 1) % len(P)]
-            objs.append({
-                "type": "line", "x1": float(x1), "y1": float(y1),
-                "x2": float(x2), "y2": float(y2),
-                "stroke": color, "strokeWidth": 2,
-                "strokeDashArray": dash if dash else None,
-                "selectable": False, "evented": False, "excludeFromExport": True,
-                "data": {"role":"committed"}
-            })
+    if P is None or len(P) < 2: return objs
+    P = np.asarray(P, dtype=float)
+    for i in range(len(P)):
+        x1, y1 = P[i]
+        x2, y2 = P[(i + 1) % len(P)]
+        objs.append({
+            "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
+            "stroke":color,"strokeWidth":width,
+            "strokeDashArray": dash if dash else None,
+            "selectable":False,"evented":False,"excludeFromExport":True,
+            "data":{"role":role}
+        })
+    return objs
+
+def union_outline_objects(add_polys, sub_polys, color="#1d4ed8"):
+    """Compute union(add) - union(sub) on GRID and return an outline as Fabric lines."""
+    mask = mask_from_polylists(add_polys, sub_polys, GRID)
+    if mask.sum() == 0:
+        return []
+    contours = measure.find_contours(mask.astype(float), 0.5)
+    objs = []
+    for c in contours:
+        ys, xs = c[:,0], c[:,1]
+        # map from GRID to canvas px
+        x_px = xs / (GRID[1]-1) * (CANVAS_W-1)
+        y_px = ys / (GRID[0]-1) * (CANVAS_H-1)
+        poly = np.column_stack([x_px, y_px])
+        objs.extend(outline_lines_from_polygon(poly, color=color, width=3, role="preview"))
     return objs
 
 def compose_canvas_json(side_key: str, working_json):
-    """Grid + committed outlines + current working polygons (editable)."""
-    color_add = "#1d4ed8" if side_key == "A" else "#dc2626"   # blue vs red
-    color_sub = "#f59e0b"                                     # amber for subtract
+    """Grid + committed union preview + current working polygons (editable)."""
+    color_add = "#1d4ed8" if side_key == "A" else "#dc2626"   # blue / red
     objs = []
     objs += grid_objects()
-    objs += outline_objects_from_polygons(st.session_state[f"{side_key}_add"], color=color_add, dash=None)
-    objs += outline_objects_from_polygons(st.session_state[f"{side_key}_sub"], color=color_sub, dash=[6, 4])
-    # Add working polygons last so they are editable
+    # committed union preview (solid outline)
+    objs += union_outline_objects(st.session_state[f"{side_key}_add"],
+                                  st.session_state[f"{side_key}_sub"],
+                                  color=color_add)
+    # working polygons (filled, editable)
     if working_json and "objects" in working_json:
         for o in working_json["objects"]:
             if o.get("type") == "polygon":
-                # Ensure they remain selectable/editable
                 o["selectable"] = True
                 o["evented"] = True
                 objs.append(o)
@@ -136,11 +144,9 @@ def compose_canvas_json(side_key: str, working_json):
 # ---------------------------- JSON <-> polygons ------------------------------
 def _polygon_points_from_fabric(obj):
     """Fabric.js polygon -> absolute canvas pixels."""
-    if obj.get("type") != "polygon":
-        return None
+    if obj.get("type") != "polygon": return None
     pts = obj.get("points") or []
-    if not pts:
-        return None
+    if not pts: return None
     left = float(obj.get("left", 0.0));  top  = float(obj.get("top", 0.0))
     sx   = float(obj.get("scaleX", 1.0)); sy  = float(obj.get("scaleY", 1.0))
     po   = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
@@ -154,9 +160,8 @@ def _polygon_points_from_fabric(obj):
     return arr if len(arr) >= 3 else None
 
 def extract_working_polygons(json_data):
-    """Return a clean working JSON with only user-editable polygons (ignore grid/committed)."""
-    if not json_data:
-        return {"objects": []}
+    """Return a clean working JSON with only user-editable polygons (ignore grid/preview)."""
+    if not json_data: return {"objects": []}
     objs = []
     for o in json_data.get("objects", []):
         if o.get("type") == "polygon" and (o.get("data") is None or o.get("data", {}).get("role") is None):
@@ -239,66 +244,74 @@ def dice_jaccard_from_masks(A, B):
     return dice, jacc, int(a), int(b), int(inter)
 
 # ------------------------------ Canvas sections ------------------------------
-def canvas_section(side_key: str, color_name: str):
-    col = st.columns(1)[0]  # single column wrapper (keeps code symmetry)
+def canvas_section(side_key: str, stroke_fill: str):
     st.subheader(f"Contour {side_key}")
-
     mode = st.radio(
         f"Mode ({side_key})",
         ["Draw + (Add)", "Draw − (Subtract)", "Transform"],
         index=0, horizontal=True, key=f"mode_{side_key}"
     )
 
-    # Build initial drawing (grid + committed outlines + working polygons)
+    # Canvas key with seed => remount on commit/reset so scene reflects committed shapes
+    canvas_key = f"canvas_{side_key}_{st.session_state[f'{side_key}_seed']}"
+
     init_json = compose_canvas_json(side_key, st.session_state[f"{side_key}_working"])
 
     canvas = st_canvas(
-        fill_color=f"rgba({0 if side_key=='A' else 255}, 0, {255 if side_key=='A' else 0}, 0.20)",
+        fill_color=stroke_fill,
         stroke_width=2,
         stroke_color=("blue" if side_key == "A" else "red"),
         background_color="white",
-        update_streamlit=False,  # update only on mouseup
+        update_streamlit=False,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=("polygon" if "Draw" in mode else "transform"),
-        display_toolbar=True,    # download/undo/redo/clear
+        display_toolbar=True,
         initial_drawing=init_json,
-        key=f"canvas_{side_key}",
+        key=canvas_key,
     )
 
     # Only keep user-editable polygons as "working"
     if canvas.json_data is not None:
         st.session_state[f"{side_key}_working"] = extract_working_polygons(canvas.json_data)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if "Draw +" in mode and st.button(f"Commit Add ({side_key})", key=f"commit_add_{side_key}"):
+    cols = st.columns([1,1,1,3])
+    with cols[0]:
+        if st.button(f"Commit Add ({side_key})", key=f"commit_add_{side_key}"):
             new_polys = polys_from_working_json(st.session_state[f"{side_key}_working"])
             st.session_state[f"{side_key}_add"].extend(new_polys)
             st.session_state[f"{side_key}_working"] = {"objects": []}
+            st.session_state[f"{side_key}_seed"] += 1  # force remount to clear working and show preview
             st.rerun()
-    with c2:
-        if "Subtract" in mode and st.button(f"Commit Subtract ({side_key})", key=f"commit_sub_{side_key}"):
+    with cols[1]:
+        if st.button(f"Commit Subtract ({side_key})", key=f"commit_sub_{side_key}"):
             new_polys = polys_from_working_json(st.session_state[f"{side_key}_working"])
             st.session_state[f"{side_key}_sub"].extend(new_polys)
             st.session_state[f"{side_key}_working"] = {"objects": []}
+            st.session_state[f"{side_key}_seed"] += 1
             st.rerun()
-    with c3:
+    with cols[2]:
         if st.button(f"Reset Shape ({side_key})", key=f"reset_{side_key}"):
             st.session_state[f"{side_key}_add"] = []
             st.session_state[f"{side_key}_sub"] = []
             st.session_state[f"{side_key}_working"] = {"objects": []}
+            st.session_state[f"{side_key}_seed"] += 1
             st.rerun()
 
+    # helpful counters
+    n_add = len(st.session_state[f"{side_key}_add"])
+    n_sub = len(st.session_state[f"{side_key}_sub"])
+    n_work = len(polys_from_working_json(st.session_state[f"{side_key}_working"]))
     st.caption(
-        "Draw one or more polygons, then press **Commit Add** to union them into the shape, "
-        "or **Commit Subtract** to carve them out. Use **Transform** to move/scale/rotate the "
-        "uncommitted polygons before committing. The grid is 1 mm minor / 5 mm major; scale bar is 10 mm."
+        f"Committed: **+{n_add}** / **−{n_sub}**  |  Working (not yet committed): **{n_work}**. "
+        "Draw polygons, then **Commit Add** to union them, or **Commit Subtract** to carve them out. "
+        "Use **Transform** to move/scale/rotate working polygons before committing. "
+        "Grid: 1 mm minor / 5 mm major; scale bar: 10 mm."
     )
 
 # Render both sides
 left_col, right_col = st.columns(2)
-with left_col:  canvas_section("A", "blue")
-with right_col: canvas_section("B", "red")
+with left_col:  canvas_section("A", "rgba(0, 0, 255, 0.20)")
+with right_col: canvas_section("B", "rgba(255, 0, 0, 0.20)")
 
 # ----------------------------- Controls --------------------------------------
 st.markdown("---")
@@ -315,13 +328,13 @@ if go:
     mB = mask_from_polylists(st.session_state["B_add"], st.session_state["B_sub"], GRID)
 
     if mA.sum() == 0 or mB.sum() == 0:
-        st.error("Both sides must contain at least one committed polygon (after add/subtract).")
+        st.error("Both sides must contain at least one committed polygon (after Add/Subtract).")
     else:
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
         dA, dB = nn_distances(pA, pB)
 
-        msd = (np.mean(dA) + np.mean(dB)) / 2
+        msd  = (np.mean(dA) + np.mean(dB)) / 2
         hd95 = max(np.percentile(dA, perc), np.percentile(dB, perc))
         hdmax = max(np.max(dA), np.max(dB))
         sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
