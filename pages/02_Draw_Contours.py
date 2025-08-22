@@ -14,12 +14,23 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# Persist the last computed plots so they don't disappear on slider/canvas edits
+# Make buttons larger everywhere
+st.markdown("""
+<style>
+div.stButton > button {
+  padding: 0.7rem 1.2rem;
+  font-size: 1.05rem;
+  width: 100%;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Persist last computed plots so they don't disappear on slider/canvas edits
 st.session_state.setdefault("draw_results", None)
 
-# Canvas & processing settings
-CANVAS_W = 300
-CANVAS_H = 300
+# Canvas & processing settings (BIGGER canvases)
+CANVAS_W = 480
+CANVAS_H = 480
 MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
 PX_PER_MM = CANVAS_W / MM_SPAN
 
@@ -66,13 +77,13 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     })
 
     # 10 mm scale bar (bottom-left)
-    bar_px = 10 * PX_PER_MM; margin = 10.0; y0 = height - margin; x0 = margin
+    bar_px = 10 * PX_PER_MM; margin = 12.0; y0 = height - margin; x0 = margin
     objs += [
         {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
          "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0,"y1":y0-5,"x2":x0,"y2":y0+5,"stroke":"#000","strokeWidth":2,
+        {"type":"line","x1":x0,"y1":y0-6,"x2":x0,"y2":y0+6,"stroke":"#000","strokeWidth":2,
          "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0+bar_px,"y1":y0-5,"x2":x0+bar_px,"y2":y0+5,"stroke":"#000","strokeWidth":2,
+        {"type":"line","x1":x0+bar_px,"y1":y0-6,"x2":x0+bar_px,"y2":y0+6,"stroke":"#000","strokeWidth":2,
          "selectable":False,"evented":False,"excludeFromExport":True},
     ]
     return objs
@@ -83,10 +94,7 @@ GRID_OBJS = grid_objects()
 # Helpers (with corrected Y orientation)
 # -----------------------------------------------------------------------------
 def _polygon_points_from_fabric(obj):
-    """
-    Convert a Fabric.js polygon object to absolute pixel coordinates.
-    Expects: type='polygon', points=[{x,y},...], left, top, scaleX, scaleY, pathOffset={x,y}.
-    """
+    """Convert a Fabric.js polygon to absolute pixel coordinates."""
     if obj.get("type") != "polygon":
         return None
     pts = obj.get("points")
@@ -113,7 +121,6 @@ def mask_from_canvas(canvas, grid_shape):
     """
     Robust mask extraction:
       1) Prefer vector polygon(s) from canvas.json_data (fast/clean).
-         (We ignore grid lines/rect because we only accept polygons.)
       2) If no polygons found, fallback to pixel threshold from image_data.
     """
     H, W = grid_shape
@@ -128,7 +135,6 @@ def mask_from_canvas(canvas, grid_shape):
         if poly is None:
             continue
         used_polygon = True
-        # Map canvas px -> GRID idx
         xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
         ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
         rr, cc = skpolygon(ys, xs, shape=(H, W))
@@ -156,15 +162,15 @@ def mask_from_canvas(canvas, grid_shape):
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
     """
-    Extract largest closed contour and resample to n_points in **mm** using
-    corrected orientation (plot y increases upward).
+    Extract largest closed contour and resample to n_points in **mm**
+    using corrected orientation (plot y increases upward).
     """
     if mask is None or mask.sum() == 0:
         return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
     if not cs:
         return np.zeros((0, 2))
-    longest = max(cs, key=lambda c: len(c))  # (row, col)
+    longest = max(cs, key=lambda c: len(c))
     if len(longest) < 3:
         return np.zeros((0, 2))
 
@@ -254,11 +260,13 @@ with right:
 # Controls
 # -----------------------------------------------------------------------------
 st.markdown("---")
-thr = st.slider("Distance Threshold (mm)", 0.5, 5.0, 1.0, 0.1)
+# MIN NOW 0.0 (used to be 0.5)
+thr = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
+
 c1, c2, _ = st.columns([1,1,6])
-go = c1.button("Go! 🚀")
-if c2.button("Clear plots"):
+go = c1.button("Go! 🚀", key="go_btn")
+if c2.button("Clear plots", key="clear_btn"):
     st.session_state.draw_results = None
 
 # -----------------------------------------------------------------------------
