@@ -658,4 +658,5 @@ st.sidebar.markdown(f"""
 (Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International)
 
 This tool is provided for research and educational purposes. Commercial use or redistribution for commercial purposes is prohibited. If you adapt or build upon this work, you must share your contributions under the same license.
+
 """)
