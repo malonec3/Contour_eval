@@ -12,6 +12,16 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
+# tighten column gutter a bit
+st.markdown(
+    """
+    <style>
+    div[data-testid="column"]{padding-left:.25rem;padding-right:.25rem}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --------------------------- canvas & grid settings ---------------------------
 CANVAS_W = 300
 CANVAS_H = 300
@@ -82,8 +92,8 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return {"objects": objs}
 
-# --------------------------- UI: two canvases side-by-side --------------------
-left, right = st.columns([1, 1])
+# --------------------------- UI: two canvases close together ------------------
+left, right = st.columns([1, 1], gap="small")
 
 with left:
     st.subheader("Contour A")
@@ -278,13 +288,13 @@ else:
     ax.set_title("Surface DICE @ Threshold (A as Ref.)", fontweight="bold")
     ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
     ok = res["dB"] <= thr
-    ax.scatter(pB[ok, 0], pB[ok, 1], c="green", s=12, alpha=0.85, label="B (within tol.)")
-    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red", s=16, alpha=0.9, label="B (outside tol.)")
+    ax.scatter(pB[ok, 0],  pB[ok, 1],  c="green", s=12, alpha=0.85, label="B (within tol.)")
+    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red",   s=16, alpha=0.9,  label="B (outside tol.)")
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper right")
 
-    # 2) Distance histogram (same as before)
+    # 2) Surface distance distribution
     ax = axes[1]
     ax.set_title("Surface Distance Distribution", fontweight="bold")
     all_d = np.concatenate([dA, dB])
@@ -298,9 +308,11 @@ else:
     ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-    # 3) DICE overlap (pixel masks)
+    # 3) DICE overlap (shade ONLY the overlap)
     ax = axes[2]
-    ax.set_title("Pixel DICE Overlap (Masks)", fontweight="bold")
+    ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
+
+    # outlines for A & B
     for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
         cs = measure.find_contours(mask.astype(float), 0.5)
         if cs:
@@ -309,6 +321,20 @@ else:
             x_mm = (xs / (GRID[1] - 1)) * 20 - 10
             y_mm = (ys / (GRID[0] - 1)) * 20 - 10
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
+
+    # shaded intersection
+    inter_mask = np.logical_and(mA, mB)
+    cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
+    first = True
+    for contour in cs_inter:
+        if len(contour) < 3:
+            continue
+        ys, xs = contour[:, 0], contour[:, 1]
+        x_mm = (xs / (GRID[1] - 1)) * 20 - 10
+        y_mm = (ys / (GRID[0] - 1)) * 20 - 10
+        ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
+        first = False
+
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper right")
