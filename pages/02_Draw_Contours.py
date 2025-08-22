@@ -8,6 +8,14 @@ from scipy import ndimage as ndi
 from skimage import measure, morphology
 from skimage.draw import polygon as skpolygon
 
+# --------------------------- utils -------------------------------------------
+def do_rerun():
+    """Streamlit rerun for old/new versions."""
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()  # pragma: no cover
+
 # --------------------------- page --------------------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
@@ -112,9 +120,11 @@ def build_initial_json():
     return init
 
 def _polygon_points_from_fabric(obj):
-    if obj.get("type") != "polygon": return None
-    pts = obj.get("points"); if_not = pts is None or len(pts) < 3
-    if if_not: return None
+    if obj.get("type") != "polygon":
+        return None
+    pts = obj.get("points")
+    if not pts or len(pts) < 3:
+        return None
     left = float(obj.get("left", 0.0)); top = float(obj.get("top", 0.0))
     sx = float(obj.get("scaleX", 1.0)); sy = float(obj.get("scaleY", 1.0))
     po = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
@@ -132,14 +142,17 @@ def commit_new_from_canvas(json_data, target):
     Add any polygons that do NOT already have data.contour to A or B.
     (This keeps committed objects persistent across reruns.)
     """
-    if not json_data: return 0
+    if not json_data:
+        return 0
     added = 0
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon": continue
+        if obj.get("type") != "polygon":
+            continue
         if obj.get("data", {}).get("contour") in ("A", "B"):
             continue
         # ensure it's a valid polygon
-        if _polygon_points_from_fabric(obj) is None: continue
+        if _polygon_points_from_fabric(obj) is None:
+            continue
         # store a copy and tag it
         o = {k: obj[k] for k in obj.keys()}
         colorize(o, target)
@@ -157,10 +170,12 @@ def apply_transforms_from_canvas(json_data):
     Overwrite committed A/B lists with the polygons found in the canvas JSON
     that are tagged as A/B (so move/scale edits persist).
     """
-    if not json_data: return
+    if not json_data:
+        return
     new_A, new_B = [], []
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon": continue
+        if obj.get("type") != "polygon":
+            continue
         tag = obj.get("data", {}).get("contour")
         if tag not in ("A", "B"):  # uncommitted scratch polygons – ignore
             continue
@@ -180,7 +195,8 @@ def mask_from_objs(objs, grid_shape):
     mask = np.zeros((H, W), dtype=bool)
     for obj in objs:
         P = _polygon_points_from_fabric(obj)
-        if P is None: continue
+        if P is None:
+            continue
         xs = P[:, 0] / (CANVAS_W - 1) * (W - 1)
         ys = P[:, 1] / (CANVAS_H - 1) * (H - 1)
         rr, cc = skpolygon(ys, xs, shape=(H, W))
@@ -192,19 +208,25 @@ def mask_from_objs(objs, grid_shape):
     return mask
 
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    if mask is None or mask.sum() == 0: return np.zeros((0, 2))
+    if mask is None or mask.sum() == 0:
+        return np.zeros((0, 2))
     cs = measure.find_contours(mask.astype(float), 0.5)
-    if not cs: return np.zeros((0, 2))
+    if not cs:
+        return np.zeros((0, 2))
     longest = max(cs, key=lambda c: len(c))
-    if len(longest) < 3: return np.zeros((0, 2))
-    diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
+    if len(longest) < 3:
+        return np.zeros((0, 2))
+    diffs = np.diff(longest, axis=0)
+    seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
-    if arclen[-1] == 0: return np.zeros((0, 2))
+    if arclen[-1] == 0:
+        return np.zeros((0, 2))
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
     resampled = np.zeros((n_points, 2), dtype=float)
     j = 0
     for i, si in enumerate(s):
-        while j < len(arclen) - 1 and arclen[j + 1] < si: j += 1
+        while j < len(arclen) - 1 and arclen[j + 1] < si:
+            j += 1
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
     ys, xs = resampled[:, 0], resampled[:, 1]
@@ -253,17 +275,17 @@ canvas = st_canvas(
 cA, cB, cT, cClrA, cClrB = st.columns([1,1,1,1,1])
 if cA.button("Commit to A"):
     commit_new_from_canvas(canvas.json_data, "A")
-    st.experimental_rerun()
+    do_rerun()
 if cB.button("Commit to B"):
     commit_new_from_canvas(canvas.json_data, "B")
-    st.experimental_rerun()
+    do_rerun()
 if cT.button("Apply transforms"):
     apply_transforms_from_canvas(canvas.json_data)
-    st.experimental_rerun()
+    do_rerun()
 if cClrA.button("Clear A"):
-    st.session_state.polys_A = []; st.session_state.canvas_seed += 1; st.experimental_rerun()
+    st.session_state.polys_A = []; st.session_state.canvas_seed += 1; do_rerun()
 if cClrB.button("Clear B"):
-    st.session_state.polys_B = []; st.session_state.canvas_seed += 1; st.experimental_rerun()
+    st.session_state.polys_B = []; st.session_state.canvas_seed += 1; do_rerun()
 
 # ----------------------------- controls --------------------------------------
 st.markdown("---")
@@ -366,7 +388,7 @@ else:
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
 
     # outlines for A & B
-    for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
+    for mask, color_name, lbl in [(res["mA"], "blue", "A"), (res["mB"], "red", "B")]:
         cs = measure.find_contours(mask.astype(float), 0.5)
         if cs:
             longest = max(cs, key=lambda c: len(c))
@@ -376,11 +398,12 @@ else:
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
 
     # shaded intersection
-    inter_mask = np.logical_and(mA, mB)
+    inter_mask = np.logical_and(res["mA"], res["mB"])
     cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
     first = True
     for contour in cs_inter:
-        if len(contour) < 3: continue
+        if len(contour) < 3:
+            continue
         ys, xs = contour[:, 0], contour[:, 1]
         x_mm = (xs / (GRID[1] - 1)) * 20 - 10
         y_mm = (ys / (GRID[0] - 1)) * 20 - 10
