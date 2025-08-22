@@ -14,7 +14,10 @@ def do_rerun():
     if hasattr(st, "rerun"):
         st.rerun()
     else:
-        st.experimental_rerun()  # pragma: no cover
+        st.experimental_rerun()
+
+def str_norm(x):
+    return (x or "").replace(" ", "").lower()
 
 # --------------------------- page --------------------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
@@ -38,6 +41,12 @@ st.session_state.setdefault("polys_A", [])          # list of Fabric polygon dic
 st.session_state.setdefault("polys_B", [])
 st.session_state.setdefault("canvas_seed", 0)       # bump to force remount when initial_drawing changes
 st.session_state.setdefault("draw_results", None)   # persisted plots
+
+# Colors used while drawing (what the canvas actually writes)
+A_FILL  = "rgba(0, 0, 255, 0.20)"
+A_STROKE= "blue"
+B_FILL  = "rgba(255, 0, 0, 0.20)"
+B_STROKE= "red"
 
 # --------------------------- helpers -----------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
@@ -93,11 +102,11 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     return {"objects": objs}
 
 def colorize(obj, contour):
-    """Set fill/stroke + tag."""
+    """Set fill/stroke + data tag."""
     if contour == "A":
-        fill, stroke = "rgba(0, 0, 255, 0.20)", "blue"
+        fill, stroke = A_FILL, A_STROKE
     else:
-        fill, stroke = "rgba(255, 0, 0, 0.20)", "red"
+        fill, stroke = B_FILL, B_STROKE
     obj["fill"] = fill
     obj["stroke"] = stroke
     obj["strokeWidth"] = 2
@@ -137,10 +146,19 @@ def _polygon_points_from_fabric(obj):
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-def commit_new_from_canvas(json_data, target):
+def looks_like_target(obj, target):
+    """Check object color to decide if it belongs to A or B (for committing)."""
+    s = str_norm(obj.get("stroke"))
+    f = str_norm(obj.get("fill"))
+    if target == "A":
+        return (s == str_norm(A_STROKE)) or ("0,0,255" in f) or (f == str_norm(A_FILL))
+    else:
+        return (s == str_norm(B_STROKE)) or ("255,0,0" in f) or (f == str_norm(B_FILL))
+
+def commit_new_from_canvas(json_data, target, only_target_color=True):
     """
-    Add any polygons that do NOT already have data.contour to A or B.
-    (This keeps committed objects persistent across reruns.)
+    Add polygons that do NOT already have data.contour.
+    If only_target_color=True, commit only shapes whose color matches the target.
     """
     if not json_data:
         return 0
@@ -150,10 +168,10 @@ def commit_new_from_canvas(json_data, target):
             continue
         if obj.get("data", {}).get("contour") in ("A", "B"):
             continue
-        # ensure it's a valid polygon
+        if only_target_color and not looks_like_target(obj, target):
+            continue
         if _polygon_points_from_fabric(obj) is None:
             continue
-        # store a copy and tag it
         o = {k: obj[k] for k in obj.keys()}
         colorize(o, target)
         if target == "A":
@@ -164,6 +182,12 @@ def commit_new_from_canvas(json_data, target):
     if added:
         st.session_state.canvas_seed += 1  # force remount with updated initial_drawing
     return added
+
+def commit_all_by_color(json_data):
+    """Convenience: commit any remaining untagged shapes to A or B based on their color."""
+    nA = commit_new_from_canvas(json_data, "A", only_target_color=True)
+    nB = commit_new_from_canvas(json_data, "B", only_target_color=True)
+    return nA + nB
 
 def apply_transforms_from_canvas(json_data):
     """
@@ -177,10 +201,10 @@ def apply_transforms_from_canvas(json_data):
         if obj.get("type") != "polygon":
             continue
         tag = obj.get("data", {}).get("contour")
-        if tag not in ("A", "B"):  # uncommitted scratch polygons – ignore
-            continue
+        if tag not in ("A", "B"):
+            continue  # uncommitted scratch shapes
         o = {k: obj[k] for k in obj.keys()}
-        colorize(o, tag)  # keep colors consistent
+        colorize(o, tag)
         if tag == "A":
             new_A.append(o)
         else:
@@ -260,9 +284,9 @@ active_tag = "A" if active.startswith("A") else "B"
 initial_json = build_initial_json()
 
 canvas = st_canvas(
-    fill_color=("rgba(0, 0, 255, 0.20)" if active_tag == "A" else "rgba(255, 0, 0, 0.20)"),
+    fill_color=(A_FILL if active_tag == "A" else B_FILL),
     stroke_width=2,
-    stroke_color=("blue" if active_tag == "A" else "red"),
+    stroke_color=(A_STROKE if active_tag == "A" else B_STROKE),
     background_color="white",
     update_streamlit=True,
     height=CANVAS_H, width=CANVAS_W,
@@ -274,10 +298,10 @@ canvas = st_canvas(
 
 cA, cB, cT, cClrA, cClrB = st.columns([1,1,1,1,1])
 if cA.button("Commit to A"):
-    commit_new_from_canvas(canvas.json_data, "A")
+    commit_new_from_canvas(canvas.json_data, "A", only_target_color=True)
     do_rerun()
 if cB.button("Commit to B"):
-    commit_new_from_canvas(canvas.json_data, "B")
+    commit_new_from_canvas(canvas.json_data, "B", only_target_color=True)
     do_rerun()
 if cT.button("Apply transforms"):
     apply_transforms_from_canvas(canvas.json_data)
@@ -300,8 +324,8 @@ if clear:
 
 # --------------------------------- compute on Go ------------------------------
 if go:
-    # Auto-commit any untagged shapes into the currently active contour (nice UX)
-    commit_new_from_canvas(canvas.json_data, active_tag)
+    # Auto-commit any untagged shapes to the correct contour by color.
+    commit_all_by_color(canvas.json_data)
     # Persist transforms if in transform mode
     apply_transforms_from_canvas(canvas.json_data)
 
