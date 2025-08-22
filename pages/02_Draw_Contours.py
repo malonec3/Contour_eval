@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -7,17 +8,6 @@ from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
 from skimage import measure, morphology
 from skimage.draw import polygon as skpolygon
-
-# --------------------------- utils -------------------------------------------
-def do_rerun():
-    """Streamlit rerun for old/new versions."""
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
-
-def str_norm(x):
-    return (x or "").replace(" ", "").lower()
 
 # --------------------------- page --------------------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
@@ -36,17 +26,14 @@ PX_PER_MM = CANVAS_W / MM_SPAN
 GRID      = (256, 256)                   # raster grid for masks/metrics
 RESAMPLE_N = 400                         # perimeter resampling count
 
-# Session state
-st.session_state.setdefault("polys_A", [])          # list of Fabric polygon dicts (committed)
-st.session_state.setdefault("polys_B", [])
-st.session_state.setdefault("canvas_seed", 0)       # bump to force remount when initial_drawing changes
-st.session_state.setdefault("draw_results", None)   # persisted plots
+# Colors used for drawing A/B
+A_FILL,  A_STROKE = "rgba(0, 0, 255, 0.20)", "blue"
+B_FILL,  B_STROKE = "rgba(255, 0, 0, 0.20)", "red"
 
-# Colors used while drawing (what the canvas actually writes)
-A_FILL  = "rgba(0, 0, 255, 0.20)"
-A_STROKE= "blue"
-B_FILL  = "rgba(255, 0, 0, 0.20)"
-B_STROKE= "red"
+# Session state
+st.session_state.setdefault("canvas_json", None)    # persist canvas shapes between reruns
+st.session_state.setdefault("canvas_seed", 0)       # force remount when needed
+st.session_state.setdefault("draw_results", None)   # persisted plots
 
 # --------------------------- helpers -----------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
@@ -54,7 +41,7 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
-    # minor
+    # minor grid
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
@@ -69,7 +56,7 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
                      "stroke":"#ebebeb","strokeWidth":1,"selectable":False,"evented":False,
                      "excludeFromExport":True})
         y += step_minor
-    # major
+    # major grid
     x = 0.0
     while x <= width + 0.5:
         xi = float(x)
@@ -101,32 +88,51 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return {"objects": objs}
 
-def colorize(obj, contour):
-    """Set fill/stroke + data tag."""
-    if contour == "A":
-        fill, stroke = A_FILL, A_STROKE
-    else:
-        fill, stroke = B_FILL, B_STROKE
-    obj["fill"] = fill
-    obj["stroke"] = stroke
-    obj["strokeWidth"] = 2
-    data = obj.get("data", {})
-    data["contour"] = contour
-    obj["data"] = data
+def color_to_rgb(s):
+    """Parse 'blue'|'red'|'#f00'|'#ff0000'|'rgb(...)'|'rgba(...)' -> (r,g,b) or None."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    if s == "blue": return (0, 0, 255)
+    if s == "red":  return (255, 0, 0)
+    if s.startswith("#"):
+        h = s[1:]
+        if len(h) == 3:
+            r, g, b = [int(ch*2, 16) for ch in h]
+        elif len(h) == 6:
+            r = int(h[0:2], 16); g = int(h[2:4], 16); b = int(h[4:6], 16)
+        else:
+            return None
+        return (r, g, b)
+    if s.startswith("rgb"):
+        nums = re.findall(r"[\d.]+", s)
+        if len(nums) >= 3:
+            r, g, b = [int(float(n)) for n in nums[:3]]
+            return (r, g, b)
+    # 'rgba(0,0,255,0.2)' etc also handled above
+    return None
 
-def build_initial_json():
-    """Grid + committed A + committed B."""
-    init = grid_objects()
-    objs = init["objects"]
-    for o in st.session_state.polys_A:
-        oo = {k: o[k] for k in o.keys()}
-        colorize(oo, "A")
-        objs.append(oo)
-    for o in st.session_state.polys_B:
-        oo = {k: o[k] for k in o.keys()}
-        colorize(oo, "B")
-        objs.append(oo)
-    return init
+def near(color, target, tol=80):
+    """Euclidean distance tolerance in RGB space."""
+    if color is None: return False
+    dr = color[0] - target[0]; dg = color[1] - target[1]; db = color[2] - target[2]
+    return (dr*dr + dg*dg + db*db) ** 0.5 <= tol
+
+BLUE = (0, 0, 255); RED = (255, 0, 0)
+
+def classify_polygons(json_data):
+    """Split canvas polygons into A (blue) and B (red) by stroke/fill color."""
+    objs_A, objs_B = [], []
+    if not json_data: return objs_A, objs_B
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "polygon":  # skip grid lines, etc.
+            continue
+        rgb = color_to_rgb(obj.get("stroke")) or color_to_rgb(obj.get("fill"))
+        if near(rgb, BLUE):
+            objs_A.append(obj)
+        elif near(rgb, RED):
+            objs_B.append(obj)
+    return objs_A, objs_B
 
 def _polygon_points_from_fabric(obj):
     if obj.get("type") != "polygon":
@@ -145,73 +151,6 @@ def _polygon_points_from_fabric(obj):
         out.append((x, y))
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
-
-def looks_like_target(obj, target):
-    """Check object color to decide if it belongs to A or B (for committing)."""
-    s = str_norm(obj.get("stroke"))
-    f = str_norm(obj.get("fill"))
-    if target == "A":
-        return (s == str_norm(A_STROKE)) or ("0,0,255" in f) or (f == str_norm(A_FILL))
-    else:
-        return (s == str_norm(B_STROKE)) or ("255,0,0" in f) or (f == str_norm(B_FILL))
-
-def commit_new_from_canvas(json_data, target, only_target_color=True):
-    """
-    Add polygons that do NOT already have data.contour.
-    If only_target_color=True, commit only shapes whose color matches the target.
-    """
-    if not json_data:
-        return 0
-    added = 0
-    for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon":
-            continue
-        if obj.get("data", {}).get("contour") in ("A", "B"):
-            continue
-        if only_target_color and not looks_like_target(obj, target):
-            continue
-        if _polygon_points_from_fabric(obj) is None:
-            continue
-        o = {k: obj[k] for k in obj.keys()}
-        colorize(o, target)
-        if target == "A":
-            st.session_state.polys_A.append(o)
-        else:
-            st.session_state.polys_B.append(o)
-        added += 1
-    if added:
-        st.session_state.canvas_seed += 1  # force remount with updated initial_drawing
-    return added
-
-def commit_all_by_color(json_data):
-    """Convenience: commit any remaining untagged shapes to A or B based on their color."""
-    nA = commit_new_from_canvas(json_data, "A", only_target_color=True)
-    nB = commit_new_from_canvas(json_data, "B", only_target_color=True)
-    return nA + nB
-
-def apply_transforms_from_canvas(json_data):
-    """
-    Overwrite committed A/B lists with the polygons found in the canvas JSON
-    that are tagged as A/B (so move/scale edits persist).
-    """
-    if not json_data:
-        return
-    new_A, new_B = [], []
-    for obj in json_data.get("objects", []):
-        if obj.get("type") != "polygon":
-            continue
-        tag = obj.get("data", {}).get("contour")
-        if tag not in ("A", "B"):
-            continue  # uncommitted scratch shapes
-        o = {k: obj[k] for k in obj.keys()}
-        colorize(o, tag)
-        if tag == "A":
-            new_A.append(o)
-        else:
-            new_B.append(o)
-    st.session_state.polys_A = new_A
-    st.session_state.polys_B = new_B
-    st.session_state.canvas_seed += 1
 
 def mask_from_objs(objs, grid_shape):
     """Union of all polygon objects -> mask."""
@@ -274,21 +213,21 @@ def dice_jaccard_from_masks(A, B):
     return dice, jacc, int(a), int(b), int(inter)
 
 # --------------------------- single canvas UI --------------------------------
-st.subheader("One canvas. Choose contour, draw, and commit. Transform to edit.")
+st.subheader("Draw two polygons in one box (A = blue, B = red). Transform to edit. Press **Go!** to compare.")
 
 mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
-active = st.radio("Active contour", ["A (blue)", "B (red)"], horizontal=True, index=0)
-active_tag = "A" if active.startswith("A") else "B"
+active = st.radio("Active contour (drawing color)", ["A (blue)", "B (red)"], horizontal=True, index=0)
+active_is_A = active.startswith("A")
 
-# Build initial JSON (grid + committed shapes)
-initial_json = build_initial_json()
+# Build initial JSON (grid plus any persisted shapes)
+initial_json = st.session_state.canvas_json or grid_objects()
 
 canvas = st_canvas(
-    fill_color=(A_FILL if active_tag == "A" else B_FILL),
+    fill_color=(A_FILL if active_is_A else B_FILL),
     stroke_width=2,
-    stroke_color=(A_STROKE if active_tag == "A" else B_STROKE),
+    stroke_color=(A_STROKE if active_is_A else B_STROKE),
     background_color="white",
-    update_streamlit=True,
+    update_streamlit=True,                 # updates json on mouseup
     height=CANVAS_H, width=CANVAS_W,
     drawing_mode=("polygon" if mode == "Draw" else "transform"),
     initial_drawing=initial_json,
@@ -296,20 +235,22 @@ canvas = st_canvas(
     key=f"single_canvas_{st.session_state.canvas_seed}",
 )
 
-cA, cB, cT, cClrA, cClrB = st.columns([1,1,1,1,1])
-if cA.button("Commit to A"):
-    commit_new_from_canvas(canvas.json_data, "A", only_target_color=True)
-    do_rerun()
-if cB.button("Commit to B"):
-    commit_new_from_canvas(canvas.json_data, "B", only_target_color=True)
-    do_rerun()
-if cT.button("Apply transforms"):
-    apply_transforms_from_canvas(canvas.json_data)
-    do_rerun()
-if cClrA.button("Clear A"):
-    st.session_state.polys_A = []; st.session_state.canvas_seed += 1; do_rerun()
-if cClrB.button("Clear B"):
-    st.session_state.polys_B = []; st.session_state.canvas_seed += 1; do_rerun()
+# Persist canvas content if we have it
+if canvas.json_data:
+    st.session_state.canvas_json = canvas.json_data
+
+cols = st.columns([1,1,6])
+with cols[0]:
+    reset = st.button("Reset canvas")
+with cols[1]:
+    st.caption("Edits persist; plots update only on **Go!**.")
+
+if reset:
+    st.session_state.canvas_json = grid_objects()
+    st.session_state.canvas_seed += 1
+    st.session_state.draw_results = None
+    if hasattr(st, "rerun"): st.rerun()
+    else: st.experimental_rerun()
 
 # ----------------------------- controls --------------------------------------
 st.markdown("---")
@@ -318,23 +259,20 @@ perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 c1, c2, _ = st.columns([1, 1, 6])
 go = c1.button("Go! 🚀")
 clear = c2.button("Clear plots")
-
 if clear:
     st.session_state.draw_results = None
 
 # --------------------------------- compute on Go ------------------------------
 if go:
-    # Auto-commit any untagged shapes to the correct contour by color.
-    commit_all_by_color(canvas.json_data)
-    # Persist transforms if in transform mode
-    apply_transforms_from_canvas(canvas.json_data)
+    jd = st.session_state.canvas_json
+    A_objs, B_objs = classify_polygons(jd)
 
-    if not st.session_state.polys_A or not st.session_state.polys_B:
+    if not A_objs or not B_objs:
         st.session_state.draw_results = None
-        st.error("Please commit at least one polygon to **A** and **B**.")
+        st.error("Please draw at least one **blue** polygon (A) and one **red** polygon (B).")
     else:
-        mA = mask_from_objs(st.session_state.polys_A, GRID)
-        mB = mask_from_objs(st.session_state.polys_B, GRID)
+        mA = mask_from_objs(A_objs, GRID)
+        mB = mask_from_objs(B_objs, GRID)
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
 
@@ -361,9 +299,9 @@ if go:
 # ------------------------------ render results (persist) ----------------------
 res = st.session_state.draw_results
 if res is None:
-    st.info("Select **Active contour** (A or B), draw polygon(s), click **Commit to A/B**. "
-            "Use **Transform** and **Apply transforms** to edit. Press **Go!** to compute metrics. "
-            "Edits won’t clear the previous plots until you press Go! again.")
+    st.info("Pick a drawing color (A = blue, B = red). Draw closed polygons. "
+            "Switch to **Transform** to edit/move/scale. Press **Go!** to compute. "
+            "Plots remain until the next **Go!**.")
 else:
     thr  = res["thr"];   perc = res["perc"]
     pA   = res["pA"];    pB   = res["pB"]
@@ -412,7 +350,7 @@ else:
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
 
     # outlines for A & B
-    for mask, color_name, lbl in [(res["mA"], "blue", "A"), (res["mB"], "red", "B")]:
+    for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
         cs = measure.find_contours(mask.astype(float), 0.5)
         if cs:
             longest = max(cs, key=lambda c: len(c))
@@ -422,7 +360,7 @@ else:
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
 
     # shaded intersection
-    inter_mask = np.logical_and(res["mA"], res["mB"])
+    inter_mask = np.logical_and(mA, mB)
     cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
     first = True
     for contour in cs_inter:
