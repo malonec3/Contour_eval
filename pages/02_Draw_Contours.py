@@ -12,11 +12,8 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# tighten gutter so canvas + controls sit nicely
 st.markdown(
-    """
-    <style>div[data-testid="column"]{padding-left:.25rem;padding-right:.25rem}</style>
-    """,
+    "<style>div[data-testid='column']{padding-left:.25rem;padding-right:.25rem}</style>",
     unsafe_allow_html=True,
 )
 
@@ -29,12 +26,11 @@ GRID      = (256, 256)                   # raster grid for masks/metrics
 RESAMPLE_N = 400                         # perimeter resampling count
 
 # Persist last results (plots only refresh on Go!)
-if "draw_results" not in st.session_state:
-    st.session_state.draw_results = None
-
-# Remount seed so we can recolor polygons after each draw
-if "single_seed" not in st.session_state:
-    st.session_state.single_seed = 0
+st.session_state.setdefault("draw_results", None)
+# Persist canvas initial drawing JSON + seed so we can recolor and remount cleanly
+st.session_state.setdefault("single_seed", 0)
+st.session_state.setdefault("canvas_init_json", None)
+st.session_state.setdefault("poly_sig", None)  # geometry signature of polygons we last applied
 
 # --------------------------- helpers -----------------------------------------
 def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
@@ -42,7 +38,6 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     objs = []
     step_minor = PX_PER_MM * minor
     step_major = PX_PER_MM * major
-
     # minor grid
     x = 0.0
     while x <= width + 0.5:
@@ -58,7 +53,6 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
                      "stroke":"#ebebeb","strokeWidth":1,"selectable":False,"evented":False,
                      "excludeFromExport":True})
         y += step_minor
-
     # major grid
     x = 0.0
     while x <= width + 0.5:
@@ -74,17 +68,13 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
                      "stroke":"#d2d2d2","strokeWidth":1,"selectable":False,"evented":False,
                      "excludeFromExport":True})
         y += step_major
-
     # border
     objs.append({"type":"rect","left":0,"top":0,"width":float(width),"height":float(height),
                  "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,
                  "evented":False,"excludeFromExport":True})
-
     # 10 mm scale bar
-    bar_px = float(10.0 * PX_PER_MM)
-    margin = 10.0
-    y0 = float(height) - margin
-    x0 = margin
+    bar_px = float(10.0 * PX_PER_MM); margin = 10.0
+    y0 = float(height) - margin; x0 = margin
     objs += [
         {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
          "selectable":False,"evented":False,"excludeFromExport":True},
@@ -114,7 +104,7 @@ def _polygon_points_from_fabric(obj):
     return arr if len(arr) >= 3 else None
 
 def extract_polygons(json_data):
-    """Return a list of (fabric_obj, Nx2 array) for every polygon in drawing order."""
+    """Return list of (fabric_obj, Nx2 array) for each polygon in drawing order."""
     results = []
     if not json_data:
         return results
@@ -126,16 +116,24 @@ def extract_polygons(json_data):
             results.append((obj, P))
     return results
 
+def polys_signature(polys_objs):
+    """Stable signature of the first few polygons (count + coarse geometry)."""
+    sig = []
+    for (_, P) in polys_objs[:4]:
+        # length + rounded sum for stability
+        sig.append((len(P), round(float(P[:,0].sum()+P[:,1].sum()), 3)))
+    return tuple(sig)
+
 def recolor_initial(polys_objs):
     """Return initial_drawing JSON with grid + recolored polygons (A blue, B red, others grey)."""
     init = grid_objects()
     colors = [
-        ("rgba(0, 0, 255, 0.20)", "blue"),        # first -> A (blue)
-        ("rgba(255, 0, 0, 0.20)", "red"),         # second -> B (red)
+        ("rgba(0, 0, 255, 0.20)", "blue"),        # A
+        ("rgba(255, 0, 0, 0.20)", "red"),         # B
     ]
     objs = init["objects"]
     for i, (obj, _) in enumerate(polys_objs):
-        # clone a lightweight polygon object for initial_drawing
+        # copy a lean polygon object
         poly = {k: obj[k] for k in obj.keys() if k != "data"}
         if i < 2:
             fill, stroke = colors[i]
@@ -168,11 +166,9 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
     if not cs: return np.zeros((0, 2))
     longest = max(cs, key=lambda c: len(c))
     if len(longest) < 3: return np.zeros((0, 2))
-
     diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
     if arclen[-1] == 0: return np.zeros((0, 2))
-
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
     resampled = np.zeros((n_points, 2), dtype=float)
     j = 0
@@ -180,7 +176,6 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
         while j < len(arclen) - 1 and arclen[j + 1] < si: j += 1
         t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
         resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
-
     ys, xs = resampled[:, 0], resampled[:, 1]
     x_mm = (xs / (GRID[1] - 1)) * 20 - 10
     y_mm = (ys / (GRID[0] - 1)) * 20 - 10
@@ -205,31 +200,30 @@ def dice_jaccard_from_masks(A, B):
 st.subheader("Draw two closed polygons: first = A (blue), second = B (red)")
 mode = st.radio("Mode", ["Draw", "Transform"], horizontal=True, index=0)
 
-# initial scene (grid; polygons recolored if we already have them)
-init_scene = grid_objects()
+# 1) use our stored initial_drawing (grid only on very first run)
+if st.session_state.canvas_init_json is None:
+    st.session_state.canvas_init_json = grid_objects()
 
 canvas = st_canvas(
-    fill_color="rgba(0, 0, 255, 0.20)",     # only used during drawing; we'll recolor after
+    fill_color="rgba(0, 0, 255, 0.20)",     # used while drawing; we'll recolor after
     stroke_width=2,
     stroke_color="black",
     background_color="white",
     update_streamlit=True,
     height=CANVAS_H, width=CANVAS_W,
     drawing_mode=("polygon" if mode == "Draw" else "transform"),
-    initial_drawing=init_scene,
+    initial_drawing=st.session_state.canvas_init_json,
     display_toolbar=True,
     key=f"single_canvas_{st.session_state.single_seed}",
 )
 
-# Recolor live polygons (A blue, B red, others grey) by remounting canvas with new initial_drawing
+# 2) recolor polygons live -> update stored initial_drawing -> remount if geometry changed
 if canvas.json_data is not None:
     polys_objs = extract_polygons(canvas.json_data)
-    # Build a compact signature to avoid infinite reruns
-    color_sig = ("sig", min(len(polys_objs), 3))  # count only; enough for recolor trigger
-    if st.session_state.get("color_sig") != color_sig:
-        st.session_state.color_sig = color_sig
-        new_init = recolor_initial(polys_objs)
-        # remount with colored polygons
+    sig = polys_signature(polys_objs)
+    if sig != st.session_state.poly_sig:
+        st.session_state.poly_sig = sig
+        st.session_state.canvas_init_json = recolor_initial(polys_objs)
         st.session_state.single_seed += 1
         st.experimental_rerun()
 
@@ -248,6 +242,7 @@ if clear:
 if go:
     polys_objs = extract_polygons(canvas.json_data or {})
     if len(polys_objs) < 2:
+        st.session_state.draw_results = None
         st.error("Please draw **two** closed polygons in the canvas (first = blue A, second = red B).")
     else:
         P_A = polys_objs[0][1]  # first
@@ -258,8 +253,8 @@ if go:
 
         pA = perimeter_points(mA, RESAMPLE_N)
         pB = perimeter_points(mB, RESAMPLE_N)
-
         if len(pA) == 0 or len(pB) == 0:
+            st.session_state.draw_results = None
             st.error("Could not extract a closed boundary from one or both drawings.")
         else:
             dA, dB = nn_distances(pA, pB)
