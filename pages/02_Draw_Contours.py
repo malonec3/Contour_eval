@@ -243,7 +243,7 @@ def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
 # -----------------------------------------------------------------------------
 # Draw/Transform toggle + canvases (side by side, touching)
 # -----------------------------------------------------------------------------
-st.markdown("**PC only - mobile devices will not work (under development)**")
+st.markdown("**PC only - mobile device compatibility is currently under development**")
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
@@ -467,4 +467,5 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
