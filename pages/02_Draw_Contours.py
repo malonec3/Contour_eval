@@ -14,22 +14,19 @@ from skimage.draw import polygon as skpolygon
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
 
-# Tighten column gap so canvases sit side-by-side (almost touching) + bigger buttons
+# Tight columns + bigger buttons
 st.markdown("""
 <style>
-/* make columns hug each other */
 [data-testid="stHorizontalBlock"] { gap: 0rem !important; }
-/* optional: slightly reduce spacing under subheaders above canvases */
 h3, h4 { margin-bottom: .25rem !important; }
-/* bigger buttons */
 div.stButton > button { padding: 0.7rem 1.2rem; font-size: 1.05rem; width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
-# Persist last computed plots so they don't disappear on slider/canvas edits
+# Persist last computed plots/metrics so they don't disappear on slider/canvas edits
 st.session_state.setdefault("draw_results", None)
 
-# Canvas & processing settings (BIGGER canvases)
+# Canvas & processing settings
 CANVAS_W = 480
 CANVAS_H = 480
 MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
@@ -211,6 +208,38 @@ def dice_jaccard_from_masks(A, B):
     return dice, jacc, int(a), int(b), int(inter)
 
 
+def centroid_mm_from_mask(M):
+    """Centroid of mask in mm coordinates (y up)."""
+    idx = np.argwhere(M)
+    if idx.size == 0:
+        return np.array([np.nan, np.nan])
+    r_mean = idx[:, 0].mean()
+    c_mean = idx[:, 1].mean()
+    x_mm = (c_mean / (GRID[1] - 1)) * 20 - 10
+    y_mm = 10 - (r_mean / (GRID[0] - 1)) * 20
+    return np.array([x_mm, y_mm])
+
+
+def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
+    """
+    Added Path Length along the test perimeter where d_test_to_ref > thr.
+    Approx: sum lengths of edges whose both endpoints are over threshold.
+    """
+    if len(points_test_mm) == 0 or len(d_test_to_ref) == 0:
+        return 0.0
+    mask = d_test_to_ref > thr_mm
+    if mask.sum() == 0:
+        return 0.0
+    P = points_test_mm
+    n = len(P)
+    total = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        if mask[i] and mask[j]:
+            total += float(np.linalg.norm(P[j] - P[i]))
+    return total
+
+
 # -----------------------------------------------------------------------------
 # Draw/Transform toggle + canvases (side by side, touching)
 # -----------------------------------------------------------------------------
@@ -218,12 +247,12 @@ st.markdown("**Mode**")
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
-# headers on one row
+# headers
 hA, hB = st.columns(2)
 with hA: st.subheader("Contour A")
 with hB: st.subheader("Contour B")
 
-# canvases on the very next row, with 0 gap (thanks to CSS above)
+# canvases
 colA, colB = st.columns(2)
 with colA:
     canvasA = st_canvas(
@@ -281,18 +310,45 @@ if go:
             st.session_state.draw_results = None
             st.error("Could not extract a closed boundary from one or both drawings.")
         else:
-            dice, jacc, areaA, areaB, inter = dice_jaccard_from_masks(mA, mB)
+            dice, jacc, areaA_px, areaB_px, inter_px = dice_jaccard_from_masks(mA, mB)
             dA, dB = nn_distances(pA, pB)
-            msd = (np.mean(dA) + np.mean(dB)) / 2
-            hd95 = max(float(np.percentile(dA, perc)),float(np.percentile(dB, perc)))
-            hdmax = max(np.max(dA), np.max(dB))
+
+            # Surface metrics
+            msd   = (np.mean(dA) + np.mean(dB)) / 2.0
+            hd95  = max(float(np.percentile(dA, perc)),
+                        float(np.percentile(dB, perc)))
+            hdmax = max(float(np.max(dA)), float(np.max(dB)))
             sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
 
+            # mm^2 areas & intersection
+            dx = 20.0 / (GRID[1] - 1)
+            dy = 20.0 / (GRID[0] - 1)
+            pix_area_mm2 = dx * dy
+            areaA_mm2 = float(areaA_px * pix_area_mm2)
+            areaB_mm2 = float(areaB_px * pix_area_mm2)
+            inter_mm2 = float(inter_px * pix_area_mm2)
+
+            # volume ratio (size similarity)
+            vol_ratio = (min(areaA_mm2, areaB_mm2) / max(areaA_mm2, areaB_mm2)) if max(areaA_mm2, areaB_mm2) > 0 else 0.0
+
+            # centroids & center distance (mm)
+            cA = centroid_mm_from_mask(mA)
+            cB = centroid_mm_from_mask(mB)
+            center_dist = float(np.linalg.norm(cA - cB)) if np.all(np.isfinite([*cA, *cB])) else float('nan')
+
+            # Added Path Length (APL) for B relative to A @ thr
+            apl = apl_length_mm(pB, dB, thr)
+
             st.session_state.draw_results = dict(
-                thr=thr, perc=perc, mA=mA, mB=mB,
-                pA=pA, pB=pB, dA=dA, dB=dB,
+                thr=thr, perc=perc,
+                mA=mA, mB=mB,
+                pA=pA, pB=pB,
+                dA=dA, dB=dB,
                 msd=msd, hd95=hd95, hdmax=hdmax, sdice=sdice,
-                dice=dice, jacc=jacc, areaA=areaA, areaB=areaB, inter=inter
+                dice=dice, jacc=jacc,
+                areaA_px=areaA_px, areaB_px=areaB_px, inter_px=inter_px,
+                areaA_mm2=areaA_mm2, areaB_mm2=areaB_mm2, inter_mm2=inter_mm2,
+                vol_ratio=vol_ratio, center_dist=center_dist, apl=apl
             )
 
 # -----------------------------------------------------------------------------
@@ -303,21 +359,54 @@ if res is None:
     st.info("Draw a closed polygon in each box (use **Draw**). Use **Transform** to tweak it. "
             "Press **Go!** to compute metrics; plots remain until you press Go again.")
 else:
+    # unpack
     thr  = res["thr"];   perc = res["perc"]
     mA   = res["mA"];    mB   = res["mB"]
     pA   = res["pA"];    pB   = res["pB"]
     dA   = res["dA"];    dB   = res["dB"]
     msd  = res["msd"];   hd95 = res["hd95"]; hdmax = res["hdmax"]; sdice = res["sdice"]
-    dice = res["dice"];  jacc = res["jacc"]; areaA = res["areaA"]; areaB = res["areaB"]; inter = res["inter"]
+    dice = res["dice"];  jacc = res["jacc"]
+    areaA_px = res["areaA_px"]; areaB_px = res["areaB_px"]; inter_px = res["inter_px"]
+    areaA_mm2 = res["areaA_mm2"]; areaB_mm2 = res["areaB_mm2"]; inter_mm2 = res["inter_mm2"]
+    vol_ratio = res["vol_ratio"]; center_dist = res["center_dist"]; apl = res["apl"]
 
-    c3, c4 = st.columns(2)
-    with c3:
-        st.write(f"**DICE (pixel)**: {dice:.3f} | **Jaccard**: {jacc:.3f}")
-        st.write(f"**Area A**: {areaA} px | **Area B**: {areaB} px | **Intersection**: {inter} px")
-    with c4:
-        st.write(f"**Surface DICE @ {thr:.1f} mm**: {sdice:.3f}")
-        st.write(f"**MSD**: {msd:.2f} mm | **HD{int(perc)}**: {hd95:.2f} mm | **Max HD**: {hdmax:.2f} mm")
+    # -------------------- Metric groups (3 columns) -------------------------
+    g1, g2, g3 = st.columns(3)
 
+    with g1:
+        st.markdown("### Volumetric Overlap Metrics (Raster)")
+        st.markdown(
+            f"""
+- **DICE Coefficient:** {dice:.4f}  \n
+- **Jaccard Index:** {jacc:.4f}  \n
+- **Volume Ratio:** {vol_ratio:.4f}
+            """
+        )
+
+    with g2:
+        st.markdown("### Surface-based Metrics (Sampled Points)")
+        st.markdown(
+            f"""
+- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}  \n
+- **Mean Surface Distance:** {msd:.3f} mm  \n
+- **95th Percentile HD:** {hd95:.3f} mm  \n
+- **Maximum Hausdorff:** {hdmax:.3f} mm
+            """
+        )
+
+    with g3:
+        st.markdown("### Geometric Properties")
+        st.markdown(
+            f"""
+- **Reference Area (A):** {areaA_mm2:.2f} mm²  \n
+- **Test Area (B):** {areaB_mm2:.2f} mm²  \n
+- **Intersection Area:** {inter_mm2:.2f} mm²  \n
+- **Center-to-Center Distance:** {center_dist:.3f} mm  \n
+- **Added Path Length (APL):** {apl:.2f} mm
+            """
+        )
+
+    # -------------------- Visuals (unchanged) -------------------------------
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # 1) Surface DICE @ threshold (A as reference)
@@ -378,4 +467,3 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
-
