@@ -402,7 +402,7 @@ else:
 - **Test Area (B):** {areaB_mm2:.2f} mm²  \n
 - **Intersection Area:** {inter_mm2:.2f} mm²  \n
 - **Center-to-Center Distance:** {center_dist:.3f} mm  \n
-- **Added Path Length (APL):** {apl:.2f} mm
+- **Added Path Length (APL) @ {thr:.1f} mm:** {apl:.2f} mm
             """
         )
 
