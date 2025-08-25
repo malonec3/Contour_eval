@@ -244,6 +244,42 @@ def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
 # Draw/Transform toggle + canvases (side by side, touching)
 # -----------------------------------------------------------------------------
 st.markdown("**PC only - mobile device compatibility is currently under development**")
+st.markdown("""
+### How to use
+
+1. **Draw A (blue)**  
+   - Make sure **Draw** is selected.  
+   - Click to place points; a **single right-click** (or double-click) closes the loop.  
+   - The grid is in **mm** (minor=1 mm, major=5 mm).
+
+2. **Draw B (red)**  
+   - Do the same in the right canvas.  
+   - Each canvas must contain **one closed contour**.
+
+3. **Transform (optional)**  
+   - Switch to **Transform** to **move/scale/rotate** a contour (drag the handles).  
+   - Use **Draw** again to add more to your contour (Should be done after clicking Go!).
+
+4. **Tune analysis settings**  
+   - Set **Distance Threshold (mm)** and **Percentile for HD** with the sliders.
+
+5. **Run and review**  
+   - Click **Go!** to compute metrics and render plots.  
+   - Plots **stay** while you edit; they only update when you press **Go!** again.  
+   - Use **Clear plots** to remove the current plots.
+
+6. **Canvas toolbar (under each canvas)**  
+   - **Undo / Redo** your last drawing steps.  
+   - **Delete** removes the selected polygon.
+
+**Notes**
+- If you see **“Both contours must be drawn and form closed regions”**, right-click to close the polygon and try again.  
+- In the “Surface DICE @ Threshold” plot, **A is the reference**.  
+- **APL** shown is the length of **B** that lies **outside** the tolerance band around **A**.
+""")
+
+
+
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
@@ -467,5 +503,6 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
 
