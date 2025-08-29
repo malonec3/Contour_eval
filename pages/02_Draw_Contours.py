@@ -371,12 +371,26 @@ with colB:
 st.markdown("---")
 
 # keep using mm internally; this only changes the label text
+# Decide if we're in CT mode (adjust to your own flag)
+ct_mode = (bg_choice in ["CT: Pelvis", "CT: Thorax"])
+
 unit_label = "cm" if ct_mode else "mm"
-upper_label = 1 if ct_mode else 5.0
-step_size_label = 0.1 if ct_mode else 1.0
-thr = st.slider(f"Distance Threshold ({unit_label})", 0.0, upper_label,step_size_label, 0.1)
 
-
+if ct_mode:
+    # slider shows cm to the user
+    thr_disp = st.slider(
+        f"Distance Threshold ({unit_label})",
+        min_value=0.0, max_value=1.0, value=0.5, step=0.1
+    )
+    thr_mm = thr_disp * 10.0
+else:
+    # slider shows mm to the user
+    thr_disp = st.slider(
+        f"Distance Threshold ({unit_label})",
+        min_value=0.0, max_value=5.0, value=1.0, step=0.1
+    )
+    thr_mm = thr_disp  # already mm
+    
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1,1,6])
@@ -560,6 +574,7 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
 
 
