@@ -329,13 +329,18 @@ elif bg_choice == "CT: Thorax":
 
 if bg_img is not None:
     CANVAS_W, CANVAS_H = bg_img.width, bg_img.height
+    # convert PIL -> numpy (H, W, 3) uint8 to satisfy st_canvas
+    bg_arr = np.array(bg_img.convert("RGB"), dtype=np.uint8)
     initial_overlay = None  # no grid on CT
 elif bg_choice == "Grid":
     CANVAS_W, CANVAS_H = BASE_W, BASE_H
+    bg_arr = None
     initial_overlay = {"objects": grid_objects(BASE_W, BASE_H)}
-else:  # None
+else:  # "None"
     CANVAS_W, CANVAS_H = BASE_W, BASE_H
+    bg_arr = None
     initial_overlay = None
+
 
 # --------------------------- Canvases ----------------------------------------
 hA, hB = st.columns(2)
@@ -344,37 +349,30 @@ with hA:
 with hB:
     st.subheader("Contour B")
 
+# --- canvases ---
+def canvas_kwargs(color_fill, color_stroke):
+    kw = dict(
+        fill_color=color_fill,
+        stroke_width=2,
+        stroke_color=color_stroke,
+        background_color="white",
+        update_streamlit=True,
+        height=CANVAS_H,
+        width=CANVAS_W,
+        drawing_mode=drawing_mode,
+        display_toolbar=True,
+    )
+    if bg_arr is not None:
+        kw["background_image"] = bg_arr
+    if initial_overlay is not None:
+        kw["initial_drawing"] = initial_overlay
+    return kw
+
 colA, colB = st.columns(2)
 with colA:
-    canvasA = st_canvas(
-        fill_color="rgba(0, 0, 255, 0.20)",
-        stroke_width=2,
-        stroke_color="blue",
-        background_color="white",
-        background_image=bg_img,            # exact size == CANVAS_W x CANVAS_H
-        update_streamlit=True,
-        height=CANVAS_H,
-        width=CANVAS_W,
-        drawing_mode=drawing_mode,
-        initial_drawing=initial_overlay,
-        display_toolbar=True,
-        key="canvasA",
-    )
+    canvasA = st_canvas(**canvas_kwargs("rgba(0, 0, 255, 0.20)", "blue"), key="canvasA")
 with colB:
-    canvasB = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.20)",
-        stroke_width=2,
-        stroke_color="red",
-        background_color="white",
-        background_image=bg_img,
-        update_streamlit=True,
-        height=CANVAS_H,
-        width=CANVAS_W,
-        drawing_mode=drawing_mode,
-        initial_drawing=initial_overlay,
-        display_toolbar=True,
-        key="canvasB",
-    )
+    canvasB = st_canvas(**canvas_kwargs("rgba(255, 0, 0, 0.20)", "red"), key="canvasB")
 
 # --------------------------- Controls ----------------------------------------
 st.markdown("---")
@@ -578,3 +576,4 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
