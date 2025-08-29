@@ -1,7 +1,7 @@
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-from PIL import Image, ImageOps 
+from PIL import Image, ImageOps
 import os
 import io, base64
 from streamlit_drawable_canvas import st_canvas
@@ -36,7 +36,6 @@ PX_PER_MM = CANVAS_W / MM_SPAN
 
 GRID = (256, 256)                   # raster grid for masks
 RESAMPLE_N = 400                    # perimeter resampling count
-
 
 # ---- Backgrounds -------------------------------------------------------------
 ASSETS_DIR = "assets"  # change if needed
@@ -82,7 +81,6 @@ def fabric_image_from_pil(img: Image.Image, w: int, h: int):
         "selectable": False, "evented": False,
         "excludeFromExport": True
     }
-
 
 # -----------------------------------------------------------------------------
 # Grid + 10 mm scale as Fabric objects (non-selectable and ignored by extractor)
@@ -163,7 +161,6 @@ def _polygon_points_from_fabric(obj):
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-
 def mask_from_canvas(canvas, grid_shape):
     """Prefer polygons from JSON; fallback to pixel thresholding."""
     H, W = grid_shape
@@ -202,7 +199,6 @@ def mask_from_canvas(canvas, grid_shape):
     mask_small = morphology.remove_small_objects(mask_small, 16)
     return mask_small
 
-
 def perimeter_points(mask, n_points=RESAMPLE_N):
     """Resample boundary to n points in **mm** with y flipped upward."""
     if mask is None or mask.sum() == 0:
@@ -234,7 +230,6 @@ def perimeter_points(mask, n_points=RESAMPLE_N):
     y_mm = 10 - (ys / (GRID[0] - 1)) * 20   # flipped so up is positive
     return np.column_stack([x_mm, y_mm])
 
-
 def nn_distances(P, Q):
     """Nearest-neighbor distances both ways."""
     if len(P) == 0 or len(Q) == 0:
@@ -246,7 +241,6 @@ def nn_distances(P, Q):
     dQ = kdP.query(Q, k=1, workers=-1)[0]
     return dP, dQ
 
-
 def dice_jaccard_from_masks(A, B):
     A = A.astype(bool); B = B.astype(bool)
     inter = np.logical_and(A, B).sum()
@@ -255,7 +249,6 @@ def dice_jaccard_from_masks(A, B):
     dice = (2 * inter) / (a + b) if (a + b) > 0 else 0.0
     jacc = inter / union if union > 0 else 0.0
     return dice, jacc, int(a), int(b), int(inter)
-
 
 def centroid_mm_from_mask(M):
     """Centroid of mask in mm coordinates (y up)."""
@@ -267,7 +260,6 @@ def centroid_mm_from_mask(M):
     x_mm = (c_mean / (GRID[1] - 1)) * 20 - 10
     y_mm = 10 - (r_mean / (GRID[0] - 1)) * 20
     return np.array([x_mm, y_mm])
-
 
 def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
     """
@@ -287,7 +279,6 @@ def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
         if mask[i] and mask[j]:
             total += float(np.linalg.norm(P[j] - P[i]))
     return total
-
 
 # -----------------------------------------------------------------------------
 # Draw/Transform toggle + canvases (side by side, touching)
@@ -313,8 +304,6 @@ bg_choice = st.radio(
     horizontal=True, index=1
 )
 
-show_grid = st.checkbox("Show grid/scale overlay", value=(bg_choice != "None"))
-
 # Build the initial Fabric object list for the canvases
 initial_objs = []
 
@@ -328,17 +317,13 @@ elif bg_choice == "CT: Thorax":
     obj = fabric_image_from_pil(img, CANVAS_W, CANVAS_H)
     if obj: initial_objs.append(obj)
 
-# grid overlay (optional)
-if show_grid and (bg_choice != "None"):
-    initial_objs.extend(GRID_OBJS)
-
-# “Grid” without CT image
-if bg_choice == "Grid":
+elif bg_choice == "Grid":
+    # Grid only (no CT overlay)
     initial_objs = list(GRID_OBJS)
 
+# “None” → leave initial_objs empty (plain white)
+
 initial_objects = {"objects": initial_objs} if initial_objs else None
-
-
 
 # headers
 hA, hB = st.columns(2)
@@ -356,7 +341,7 @@ with colA:
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # <-- image/grid live here
+        initial_drawing=initial_objects,   # image or grid (or None)
         display_toolbar=True,
         key="canvasA",
     )
@@ -370,12 +355,10 @@ with colB:
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # <-- image/grid live here
+        initial_drawing=initial_objects,   # image or grid (or None)
         display_toolbar=True,
         key="canvasB",
     )
-
-
 
 # -----------------------------------------------------------------------------
 # Controls
@@ -473,8 +456,8 @@ else:
         st.markdown("### Volumetric Overlap Metrics (Raster)")
         st.markdown(
             f"""
-- **DICE Coefficient:** {dice:.4f}  \n
-- **Jaccard Index:** {jacc:.4f}  \n
+- **DICE Coefficient:** {dice:.4f}  
+- **Jaccard Index:** {jacc:.4f}  
 - **Volume Ratio:** {vol_ratio:.4f}
             """
         )
@@ -483,9 +466,9 @@ else:
         st.markdown("### Surface-based Metrics (Sampled Points)")
         st.markdown(
             f"""
-- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}  \n
-- **Mean Surface Distance:** {msd:.3f} mm  \n
-- **95th Percentile HD:** {hd95:.3f} mm  \n
+- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}  
+- **Mean Surface Distance:** {msd:.3f} mm  
+- **95th Percentile HD:** {hd95:.3f} mm  
 - **Maximum Hausdorff:** {hdmax:.3f} mm
             """
         )
@@ -494,10 +477,10 @@ else:
         st.markdown("### Geometric Properties")
         st.markdown(
             f"""
-- **Reference Area (A):** {areaA_mm2:.2f} mm²  \n
-- **Test Area (B):** {areaB_mm2:.2f} mm²  \n
-- **Intersection Area:** {inter_mm2:.2f} mm²  \n
-- **Center-to-Center Distance:** {center_dist:.3f} mm  \n
+- **Reference Area (A):** {areaA_mm2:.2f} mm²  
+- **Test Area (B):** {areaB_mm2:.2f} mm²  
+- **Intersection Area:** {inter_mm2:.2f} mm²  
+- **Center-to-Center Distance:** {center_dist:.3f} mm  
 - **Added Path Length (APL) @ {thr:.1f} mm:** {apl:.2f} mm
             """
         )
@@ -563,7 +546,3 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
-
-
-
-
