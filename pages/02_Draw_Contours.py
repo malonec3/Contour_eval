@@ -2,7 +2,8 @@ import os
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-from PIL import Image
+import io, base64
+from PIL import Image, ImageOps
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
@@ -34,24 +35,48 @@ GRID = (256, 256)
 RESAMPLE_N = 400
 
 # --------------------------- Assets ------------------------------------------
+
 ASSETS_DIR = "assets"
 PELVIS_PATH = os.path.join(ASSETS_DIR, "ct_pelvis.png")
 THORAX_PATH = os.path.join(ASSETS_DIR, "ct_thorax.png")
 
-def load_ct_bg(path: str, target_h: int = 480, max_w: int = 1200):
-    """Load CT, fit to target height (preserve aspect). Return PIL.Image or None."""
+def load_ct_bg(path: str):
+    """Load CT; return PIL.Image or None if not found."""
     if not path or not os.path.exists(path):
         return None
-    img = Image.open(path).convert("RGB")
+    return Image.open(path).convert("RGB")
+def letterbox_to_height(img: Image.Image, target_h: int) -> Image.Image:
+    """Scale to target height, preserve aspect; paste on matte width x target_h."""
+    if img.height == 0:
+        return None
     scale = target_h / float(img.height)
     new_w = int(round(img.width * scale))
-    new_h = target_h
-    if new_w > max_w:
-        s = max_w / new_w
-        new_w = int(round(new_w * s))
-        new_h = int(round(new_h * s))
-    return img.resize((new_w, new_h), Image.BILINEAR)
+    resized = img.resize((new_w, target_h), Image.BICUBIC)
+    return resized
 
+def pil_to_data_url(img: Image.Image) -> str:
+    """PNG data URL for Fabric image object."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+def fabric_image_object(img: Image.Image):
+    """Non-selectable background image for initial_drawing."""
+    return {
+        "type": "image",
+        "left": 0,
+        "top": 0,
+        "width": float(img.width),
+        "height": float(img.height),
+        "src": pil_to_data_url(img),
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "selectable": False,
+        "evented": False,
+        "excludeFromExport": True,
+        "opacity": 1.0,
+        "crossOrigin": "anonymous",
+    }
 # --------------------------- Grid overlay objects ----------------------------
 def grid_objects(width: int, height: int, mm_span: float = MM_SPAN, major: int = 5, minor: int = 1):
     """Fabric.js objects for a grid + 10 mm scale bar."""
@@ -317,62 +342,77 @@ bg_choice = st.radio(
 )
 
 # --------------------------- Decide sizes/backgrounds -------------------------
-TARGET_H = 480
-
-bg_img = None
-initial_overlay = None
+# Decide canvas size + initial overlay
+TARGET_H = 480  # fit CT vertically to this height
+bg_img_pil = None
+initial_objects_A = []
+initial_objects_B = []
 
 if bg_choice == "CT: Pelvis":
-    bg_img = load_ct_bg(PELVIS_PATH, target_h=TARGET_H)
+    bg_img_pil = load_ct_bg(PELVIS_PATH)
 elif bg_choice == "CT: Thorax":
-    bg_img = load_ct_bg(THORAX_PATH, target_h=TARGET_H)
+    bg_img_pil = load_ct_bg(THORAX_PATH)
 
-if bg_img is not None:
-    CANVAS_W, CANVAS_H = bg_img.width, bg_img.height
-    # convert PIL -> numpy (H, W, 3) uint8 to satisfy st_canvas
-    bg_arr = np.array(bg_img.convert("RGB"), dtype=np.uint8)
-    initial_overlay = None  # no grid on CT
+if bg_img_pil is not None:
+    # Make canvas match CT (fit by height, preserve aspect)
+    ct_fitted = letterbox_to_height(bg_img_pil, TARGET_H)
+    CANVAS_W, CANVAS_H = ct_fitted.width, ct_fitted.height
+    PX_PER_MM = CANVAS_W / MM_SPAN  # refresh scale now that width is known
+    # Put CT image as the first (background) Fabric object, no grid overlay
+    initial_objects_A = [fabric_image_object(ct_fitted)]
+    initial_objects_B = [fabric_image_object(ct_fitted)]
 elif bg_choice == "Grid":
-    CANVAS_W, CANVAS_H = BASE_W, BASE_H
-    bg_arr = None
-    initial_overlay = {"objects": grid_objects(BASE_W, BASE_H)}
+    # Use square canvas with grid/scale overlay
+    CANVAS_W = CANVAS_H = 480
+    PX_PER_MM = CANVAS_W / MM_SPAN
+    grid_objs = grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1)
+    initial_objects_A = grid_objs
+    initial_objects_B = grid_objs
 else:  # "None"
-    CANVAS_W, CANVAS_H = BASE_W, BASE_H
-    bg_arr = None
-    initial_overlay = None
+    CANVAS_W = CANVAS_H = 480
+    PX_PER_MM = CANVAS_W / MM_SPAN
+    initial_objects_A = []
+    initial_objects_B = []
 
+# -------------------- Draw/Transform toggle --------------------
+mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
+drawing_mode = "polygon" if mode == "Draw" else "transform"
 
-# --------------------------- Canvases ----------------------------------------
+# -------------------- Headers + canvases (side-by-side) --------------------
 hA, hB = st.columns(2)
-with hA:
-    st.subheader("Contour A")
-with hB:
-    st.subheader("Contour B")
-
-# --- canvases ---
-def canvas_kwargs(color_fill, color_stroke):
-    kw = dict(
-        fill_color=color_fill,
-        stroke_width=2,
-        stroke_color=color_stroke,
-        background_color="white",
-        update_streamlit=True,
-        height=CANVAS_H,
-        width=CANVAS_W,
-        drawing_mode=drawing_mode,
-        display_toolbar=True,
-    )
-    if bg_arr is not None:
-        kw["background_image"] = bg_arr
-    if initial_overlay is not None:
-        kw["initial_drawing"] = initial_overlay
-    return kw
+with hA: st.subheader("Contour A")
+with hB: st.subheader("Contour B")
 
 colA, colB = st.columns(2)
+
+common_canvas_kwargs = dict(
+    background_color="white",
+    update_streamlit=True,
+    height=CANVAS_H,
+    width=CANVAS_W,
+    drawing_mode=drawing_mode,
+    display_toolbar=True,
+)
+
 with colA:
-    canvasA = st_canvas(**canvas_kwargs("rgba(0, 0, 255, 0.20)", "blue"), key="canvasA")
+    canvasA = st_canvas(
+        fill_color="rgba(0, 0, 255, 0.20)",
+        stroke_width=2,
+        stroke_color="blue",
+        initial_drawing={"objects": initial_objects_A} if initial_objects_A else None,
+        key="canvasA",
+        **common_canvas_kwargs,
+    )
+
 with colB:
-    canvasB = st_canvas(**canvas_kwargs("rgba(255, 0, 0, 0.20)", "red"), key="canvasB")
+    canvasB = st_canvas(
+        fill_color="rgba(255, 0, 0, 0.20)",
+        stroke_width=2,
+        stroke_color="red",
+        initial_drawing={"objects": initial_objects_B} if initial_objects_B else None,
+        key="canvasB",
+        **common_canvas_kwargs,
+    )
 
 # --------------------------- Controls ----------------------------------------
 st.markdown("---")
@@ -576,4 +616,5 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
