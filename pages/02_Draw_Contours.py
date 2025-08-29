@@ -60,11 +60,9 @@ def load_bg_image(path: str, canvas_w: int, canvas_h: int):
     return matte
 
 def pil_to_data_url(img: Image.Image) -> str:
-    """Encode a PIL image as a data URL for Fabric.js."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
 
 def fabric_image_from_pil(img: Image.Image, w: int, h: int):
     """Return a Fabric 'image' object JSON sized to the canvas."""
@@ -74,14 +72,23 @@ def fabric_image_from_pil(img: Image.Image, w: int, h: int):
         "type": "image",
         "left": 0, "top": 0,
         "width": float(w), "height": float(h),
-        "scaleX": 1.0, "scaleY": 1.0,
-        "angle": 0,
-        "opacity": 1.0,
+        "scaleX": 1.0, "scaleY": 1.0, "angle": 0, "opacity": 1.0,
         "crossOrigin": "anonymous",
         "src": pil_to_data_url(img),
-        "selectable": False, "evented": False,
-        "excludeFromExport": True
+        "selectable": False, "evented": False, "excludeFromExport": True,
     }
+
+def infer_canvas_height_for_image(path: str, base_w: int, fallback_h: int) -> int:
+    """Compute canvas height that preserves the CT image aspect ratio (fills vertically)."""
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+            if w > 0:
+                return max(100, int(round(base_w * (h / w))))  # keep sane minimum
+    except Exception:
+        pass
+    return fallback_h
+
 
 
 # -----------------------------------------------------------------------------
@@ -329,39 +336,94 @@ st.markdown("""
 
 
 
+# Mode toggle
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
+# Background choice
 bg_choice = st.radio(
     "Canvas background",
     ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
-    horizontal=True, index=1
+    horizontal=True,
+    index=1,   # default to Grid like before
 )
 
-show_grid = st.checkbox("Show grid/scale overlay", value=(bg_choice != "None"))
+# Effective canvas size: width is fixed; height adapts for CT images
+BASE_CANVAS_W = CANVAS_W          # keep your chosen width
+BASE_CANVAS_H = CANVAS_H          # default square height
 
-# Build the initial Fabric object list for the canvases
+if bg_choice == "CT: Pelvis" and os.path.exists(PELVIS_PATH):
+    CANVAS_H = infer_canvas_height_for_image(PELVIS_PATH, BASE_CANVAS_W, BASE_CANVAS_H)
+elif bg_choice == "CT: Thorax" and os.path.exists(THORAX_PATH):
+    CANVAS_H = infer_canvas_height_for_image(THORAX_PATH, BASE_CANVAS_W, BASE_CANVAS_H)
+else:
+    CANVAS_H = BASE_CANVAS_H  # None / Grid → default
+
+# Recompute scale-bar spacing for the (possibly) new height
+PX_PER_MM = BASE_CANVAS_W / MM_SPAN
+
+def grid_objects(width=BASE_CANVAS_W, height=CANVAS_H, major=5, minor=1):
+    # (same body as your existing function)
+    objs = []
+    step_minor = PX_PER_MM * minor
+    step_major = PX_PER_MM * major
+    def add_line(x1,y1,x2,y2,color):
+        objs.append({
+            "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
+            "stroke":color,"strokeWidth":1,"selectable":False,"evented":False,
+            "excludeFromExport":True
+        })
+    # minor grid
+    x = 0.0
+    while x <= width + 0.5:
+        add_line(x, 0, x, height, "#ebebeb"); x += step_minor
+    y = 0.0
+    while y <= height + 0.5:
+        add_line(0, y, width, y, "#ebebeb"); y += step_minor
+    # major grid
+    x = 0.0
+    while x <= width + 0.5:
+        add_line(x, 0, x, height, "#d2d2d2"); x += step_major
+    y = 0.0
+    while y <= height + 0.5:
+        add_line(0, y, width, y, "#d2d2d2"); y += step_major
+    # border
+    objs.append({
+        "type":"rect","left":0,"top":0,"width":float(width),"height":float(height),
+        "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,"evented":False,
+        "excludeFromExport":True
+    })
+    # 10 mm scale bar (bottom-left)
+    bar_px = 10 * PX_PER_MM; margin = 12.0; y0 = height - margin; x0 = margin
+    objs += [
+        {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
+         "selectable":False,"evented":False,"excludeFromExport":True},
+        {"type":"line","x1":x0,"y1":y0-6,"x2":x0,"y2":y0+6,"stroke":"#000","strokeWidth":2,
+         "selectable":False,"evented":False,"excludeFromExport":True},
+        {"type":"line","x1":x0+bar_px,"y1":y0-6,"x2":x0+bar_px,"y2":y0+6,"stroke":"#000","strokeWidth":2,
+         "selectable":False,"evented":False,"excludeFromExport":True},
+    ]
+    return objs
+
+# Build initial Fabric objects
 initial_objs = []
 
 if bg_choice == "CT: Pelvis":
-    img = load_bg_image(PELVIS_PATH, CANVAS_W, CANVAS_H)
-    obj = fabric_image_from_pil(img, CANVAS_W, CANVAS_H)
+    img = load_bg_image(PELVIS_PATH, BASE_CANVAS_W, CANVAS_H)  # NOTE: pass new height
+    obj = fabric_image_from_pil(img, BASE_CANVAS_W, CANVAS_H)
     if obj: initial_objs.append(obj)
 
 elif bg_choice == "CT: Thorax":
-    img = load_bg_image(THORAX_PATH, CANVAS_W, CANVAS_H)
-    obj = fabric_image_from_pil(img, CANVAS_W, CANVAS_H)
+    img = load_bg_image(THORAX_PATH, BASE_CANVAS_W, CANVAS_H)
+    obj = fabric_image_from_pil(img, BASE_CANVAS_W, CANVAS_H)
     if obj: initial_objs.append(obj)
 
-# grid overlay (optional)
-if show_grid and (bg_choice != "None"):
-    initial_objs.extend(GRID_OBJS)
+elif bg_choice == "Grid":
+    initial_objs.extend(grid_objects(BASE_CANVAS_W, CANVAS_H))  # grid only
 
-# “Grid” without CT image
-if bg_choice == "Grid":
-    initial_objs = list(GRID_OBJS)
+# No grid overlay by default on CT backgrounds
+initial_drawing = {"objects": initial_objs} if initial_objs else None
 
-initial_objects = {"objects": initial_objs} if initial_objs else None
 
 
 
@@ -379,9 +441,9 @@ with colA:
         stroke_color="blue",
         background_color="white",
         update_streamlit=True,
-        height=CANVAS_H, width=CANVAS_W,
+        height=CANVAS_H, width=BASE_CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # <-- image/grid live here
+        initial_drawing=initial_drawing,  
         display_toolbar=True,
         key="canvasA",
     )
@@ -393,9 +455,9 @@ with colB:
         stroke_color="red",
         background_color="white",
         update_streamlit=True,
-        height=CANVAS_H, width=CANVAS_W,
+        height=CANVAS_H, width=BASE_CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # <-- image/grid live here
+        initial_drawing=initial_drawing,  
         display_toolbar=True,
         key="canvasB",
     )
@@ -588,6 +650,7 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
 
 
