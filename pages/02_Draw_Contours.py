@@ -372,7 +372,11 @@ st.markdown("---")
 
 # keep using mm internally; this only changes the label text
 unit_label = "cm" if ct_mode else "mm"
-thr = st.slider(f"Distance Threshold ({unit_label})", 0.0, 5.0, 1.0, 0.1)
+upper_label = 1 if ct_mode else 5
+step_size_label = 0.1 if ct_mode else 1.0
+thr = st.slider(f"Distance Threshold ({unit_label})", 0.0, {upper_label}, {step_size_label}, 0.1)
+
+
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1,1,6])
@@ -556,4 +560,5 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
