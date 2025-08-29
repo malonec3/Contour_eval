@@ -369,7 +369,10 @@ with colB:
 # Controls
 # -----------------------------------------------------------------------------
 st.markdown("---")
-thr  = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)   # keep slider in mm
+
+# keep using mm internally; this only changes the label text
+unit_label = "cm" if ct_mode else "mm"
+thr = st.slider(f"Distance Threshold ({unit_label})", 0.0, 5.0, 1.0, 0.1)
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1,1,6])
@@ -553,3 +556,4 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
