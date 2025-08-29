@@ -1,5 +1,6 @@
 import os
-import io, base64
+import io
+import base64
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -13,6 +14,7 @@ from skimage.draw import polygon as skpolygon
 # --------------------------- Page / styling ----------------------------------
 st.set_page_config(layout="wide", page_title="Draw Contours - RadOnc Metrics")
 st.title("Draw Two Contours and Compare")
+
 st.markdown(
     """
 <style>
@@ -24,11 +26,10 @@ div.stButton > button { padding: 0.7rem 1.2rem; font-size: 1.05rem; width: 100%;
     unsafe_allow_html=True,
 )
 
+# Persist last computed plots/metrics so they don't disappear on edits
 st.session_state.setdefault("draw_results", None)
 
 # --------------------------- Base geometry -----------------------------------
-BASE_W = 480
-BASE_H = 480
 MM_SPAN = 20.0  # world extent [-10, +10] mm both axes
 GRID = (256, 256)
 RESAMPLE_N = 400
@@ -38,37 +39,32 @@ ASSETS_DIR = "assets"
 PELVIS_PATH = os.path.join(ASSETS_DIR, "ct_pelvis.png")
 THORAX_PATH = os.path.join(ASSETS_DIR, "ct_thorax.png")
 
-def load_ct_bg(path: str):
+TARGET_CT_HEIGHT = 520  # visual target height for CT backgrounds
+
+def load_ct_bg(path: str) -> Image.Image | None:
     """Load CT; return PIL.Image or None if not found."""
     if not path or not os.path.exists(path):
         return None
-    # exif-safe in case image has orientation flags
-    try:
-        from PIL import ImageOps
-        return ImageOps.exif_transpose(Image.open(path).convert("RGB"))
-    except Exception:
-        return Image.open(path).convert("RGB")
+    return Image.open(path).convert("RGB")
 
-def letterbox_to_height(img: Image.Image, target_h: int) -> Image.Image:
-    """Scale to target height, preserve aspect (no distortion)."""
-    if img.height == 0:
-        return None
+def fit_to_height(img: Image.Image, target_h: int) -> Image.Image:
+    """Scale the image to `target_h` exactly (preserves aspect ratio)."""
     scale = target_h / float(img.height)
     new_w = int(round(img.width * scale))
     return img.resize((new_w, target_h), Image.BICUBIC)
 
 def pil_to_data_url(img: Image.Image) -> str:
-    """PNG data URL for Fabric image object."""
+    """Return a PNG data URL for Fabric image."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-def fabric_image_object(img: Image.Image):
-    """Non-selectable background image for initial_drawing."""
+def fabric_bg_image(img: Image.Image) -> dict:
+    """Non-selectable Fabric image at (0,0) with its native size."""
     return {
         "type": "image",
-        "left": 0,
-        "top": 0,
+        "left": 0.0,
+        "top": 0.0,
         "width": float(img.width),
         "height": float(img.height),
         "src": pil_to_data_url(img),
@@ -77,8 +73,6 @@ def fabric_image_object(img: Image.Image):
         "selectable": False,
         "evented": False,
         "excludeFromExport": True,
-        "opacity": 1.0,
-        "crossOrigin": "anonymous",
     }
 
 # --------------------------- Grid overlay objects ----------------------------
@@ -109,39 +103,82 @@ def grid_objects(width: int, height: int, mm_span: float = MM_SPAN, major: int =
     # minor grid
     x = 0.0
     while x <= width + 0.5:
-        add_line(x, 0, x, height, "#ebebeb"); x += step_minor
+        add_line(x, 0, x, height, "#ebebeb")
+        x += step_minor
     y = 0.0
     while y <= height + 0.5:
-        add_line(0, y, width, y, "#ebebeb"); y += step_minor
+        add_line(0, y, width, y, "#ebebeb")
+        y += step_minor
 
     # major grid
     x = 0.0
     while x <= width + 0.5:
-        add_line(x, 0, x, height, "#d2d2d2"); x += step_major
+        add_line(x, 0, x, height, "#d2d2d2")
+        x += step_major
     y = 0.0
     while y <= height + 0.5:
-        add_line(0, y, width, y, "#d2d2d2"); y += step_major
+        add_line(0, y, width, y, "#d2d2d2")
+        y += step_major
 
     # border
     objs.append(
         {
             "type": "rect",
-            "left": 0, "top": 0,
-            "width": float(width), "height": float(height),
-            "fill": "", "stroke": "#c8c8c8", "strokeWidth": 1,
-            "selectable": False, "evented": False, "excludeFromExport": True,
+            "left": 0,
+            "top": 0,
+            "width": float(width),
+            "height": float(height),
+            "fill": "",
+            "stroke": "#c8c8c8",
+            "strokeWidth": 1,
+            "selectable": False,
+            "evented": False,
+            "excludeFromExport": True,
         }
     )
 
     # 10 mm scale bar (bottom-left)
-    bar_px = 10 * px_per_mm; margin = 12.0; y0 = height - margin; x0 = margin
+    bar_px = 10 * px_per_mm
+    margin = 12.0
+    y0 = height - margin
+    x0 = margin
     objs += [
-        {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
-         "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0,"y1":y0-6,"x2":x0,"y2":y0+6,"stroke":"#000","strokeWidth":2,
-         "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0+bar_px,"y1":y0-6,"x2":x0+bar_px,"y2":y0+6,"stroke":"#000","strokeWidth":2,
-         "selectable":False,"evented":False,"excludeFromExport":True},
+        {
+            "type": "line",
+            "x1": x0,
+            "y1": y0,
+            "x2": x0 + bar_px,
+            "y2": y0,
+            "stroke": "#000",
+            "strokeWidth": 3,
+            "selectable": False,
+            "evented": False,
+            "excludeFromExport": True,
+        },
+        {
+            "type": "line",
+            "x1": x0,
+            "y1": y0 - 6,
+            "x2": x0,
+            "y2": y0 + 6,
+            "stroke": "#000",
+            "strokeWidth": 2,
+            "selectable": False,
+            "evented": False,
+            "excludeFromExport": True,
+        },
+        {
+            "type": "line",
+            "x1": x0 + bar_px,
+            "y1": y0 - 6,
+            "x2": x0 + bar_px,
+            "y2": y0 + 6,
+            "stroke": "#000",
+            "strokeWidth": 2,
+            "selectable": False,
+            "evented": False,
+            "excludeFromExport": True,
+        },
     ]
     return objs
 
@@ -194,6 +231,7 @@ def mask_from_canvas(canvas, grid_shape):
         mask = morphology.remove_small_objects(mask, 16)
         return mask
 
+    # Fallback to pixel route if no polygons found
     img = canvas.image_data
     if img is None:
         return None
@@ -245,9 +283,11 @@ def nn_distances(P, Q):
     return dP, dQ
 
 def dice_jaccard_from_masks(A, B):
-    A = A.astype(bool); B = B.astype(bool)
+    A = A.astype(bool)
+    B = B.astype(bool)
     inter = np.logical_and(A, B).sum()
-    a = A.sum(); b = B.sum()
+    a = A.sum()
+    b = B.sum()
     union = a + b - inter
     dice = (2 * inter) / (a + b) if (a + b) > 0 else 0.0
     jacc = inter / union if union > 0 else 0.0
@@ -278,7 +318,7 @@ def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
     return total
 
 # --------------------------- Instructions ------------------------------------
-st.markdown("**PC only - mobile device compatibility is currently under development**")
+st.markdown("**PC only – mobile device compatibility is currently under development**")
 st.markdown(
     """
 ### How to use
@@ -290,60 +330,62 @@ st.markdown(
 """
 )
 
-# ---- ONE draw/transform radio (add a key) ----
-mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0, key="mode_radio")
+mode = st.radio("Editing mode", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
-# ---- Background choice (with a key) ----
 bg_choice = st.radio(
     "Canvas background",
     ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
     horizontal=True,
     index=1,
-    key="bg_choice_radio",
 )
 
 # --------------------------- Decide sizes/backgrounds -------------------------
-TARGET_H = 480  # fit CT vertically to this height
+# Decide canvas size + initial overlay/background
 bg_img_pil = None
 initial_objects_A = []
 initial_objects_B = []
 
 if bg_choice == "CT: Pelvis":
-    bg_img_pil = load_ct_bg(PELVIS_PATH)
+    src = load_ct_bg(PELVIS_PATH)
+    if src:
+        bg_img_pil = fit_to_height(src, TARGET_CT_HEIGHT)
 elif bg_choice == "CT: Thorax":
-    bg_img_pil = load_ct_bg(THORAX_PATH)
+    src = load_ct_bg(THORAX_PATH)
+    if src:
+        bg_img_pil = fit_to_height(src, TARGET_CT_HEIGHT)
 
 if bg_img_pil is not None:
-    ct_fitted = letterbox_to_height(bg_img_pil, TARGET_H)
-    CANVAS_W, CANVAS_H = ct_fitted.width, ct_fitted.height
-    # NOTE: no grid overlay on CT
-    initial_objects_A = [fabric_image_object(ct_fitted)]
-    initial_objects_B = [fabric_image_object(ct_fitted)]
-elif bg_choice == "Grid":
-    CANVAS_W = CANVAS_H = BASE_W  # square canvas
-    gridA = grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1)
-    gridB = grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1)
-    initial_objects_A = gridA
-    initial_objects_B = gridB
-else:  # "None"
-    CANVAS_W = BASE_W
-    CANVAS_H = BASE_H
-    initial_objects_A = []
-    initial_objects_B = []
+    # Canvas == CT image size (no stretch, no letterbox)
+    CANVAS_W, CANVAS_H = bg_img_pil.width, bg_img_pil.height
+    # No grid overlay on CT images:
+    initial_objects_A = [fabric_bg_image(bg_img_pil)]
+    initial_objects_B = [fabric_bg_image(bg_img_pil)]
+else:
+    # Square canvas for None/Grid
+    CANVAS_W = CANVAS_H = 480
+    if bg_choice == "Grid":
+        grid_objs = grid_objects(CANVAS_W, CANVAS_H)
+        initial_objects_A = grid_objs
+        initial_objects_B = grid_objs
+    else:
+        initial_objects_A = []
+        initial_objects_B = []
 
 # -------------------- Headers + canvases (side-by-side) --------------------
 hA, hB = st.columns(2)
-with hA: st.subheader("Contour A")
-with hB: st.subheader("Contour B")
+with hA:
+    st.subheader("Contour A")
+with hB:
+    st.subheader("Contour B")
 
 colA, colB = st.columns(2)
 
 common_canvas_kwargs = dict(
     background_color="white",
     update_streamlit=True,
-    height=CANVAS_H,
     width=CANVAS_W,
+    height=CANVAS_H,
     drawing_mode=drawing_mode,
     display_toolbar=True,
 )
@@ -370,8 +412,8 @@ with colB:
 
 # --------------------------- Controls ----------------------------------------
 st.markdown("---")
-thr = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1, key="thr_slider")
-perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1, key="perc_slider")
+thr = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)
+perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1, 1, 6])
 go = c1.button("Go! 🚀", key="go_btn")
@@ -423,12 +465,29 @@ if go:
             apl = apl_length_mm(pB, dB, thr)
 
             st.session_state.draw_results = dict(
-                thr=thr, perc=perc, mA=mA, mB=mB, pA=pA, pB=pB, dA=dA, dB=dB,
-                msd=msd, hd95=hd95, hdmax=hdmax, sdice=sdice,
-                dice=dice, jacc=jacc,
-                areaA_px=areaA_px, areaB_px=areaB_px, inter_px=inter_px,
-                areaA_mm2=areaA_mm2, areaB_mm2=areaB_mm2, inter_mm2=inter_mm2,
-                vol_ratio=vol_ratio, center_dist=center_dist, apl=apl,
+                thr=thr,
+                perc=perc,
+                mA=mA,
+                mB=mB,
+                pA=pA,
+                pB=pB,
+                dA=dA,
+                dB=dB,
+                msd=msd,
+                hd95=hd95,
+                hdmax=hdmax,
+                sdice=sdice,
+                dice=dice,
+                jacc=jacc,
+                areaA_px=areaA_px,
+                areaB_px=areaB_px,
+                inter_px=inter_px,
+                areaA_mm2=areaA_mm2,
+                areaB_mm2=areaB_mm2,
+                inter_mm2=inter_mm2,
+                vol_ratio=vol_ratio,
+                center_dist=center_dist,
+                apl=apl,
             )
 
 # --------------------------- Render persisted results ------------------------
@@ -439,15 +498,29 @@ if res is None:
         "Press **Go!** to compute metrics; plots remain until you press Go again."
     )
 else:
-    thr = res["thr"]; perc = res["perc"]
-    mA = res["mA"];   mB = res["mB"]
-    pA = res["pA"];   pB = res["pB"]
-    dA = res["dA"];   dB = res["dB"]
-    msd = res["msd"]; hd95 = res["hd95"]; hdmax = res["hdmax"]; sdice = res["sdice"]
-    dice = res["dice"]; jacc = res["jacc"]
-    areaA_px = res["areaA_px"]; areaB_px = res["areaB_px"]; inter_px = res["inter_px"]
-    areaA_mm2 = res["areaA_mm2"]; areaB_mm2 = res["areaB_mm2"]; inter_mm2 = res["inter_mm2"]
-    vol_ratio = res["vol_ratio"]; center_dist = res["center_dist"]; apl = res["apl"]
+    thr = res["thr"]
+    perc = res["perc"]
+    mA = res["mA"]
+    mB = res["mB"]
+    pA = res["pA"]
+    pB = res["pB"]
+    dA = res["dA"]
+    dB = res["dB"]
+    msd = res["msd"]
+    hd95 = res["hd95"]
+    hdmax = res["hdmax"]
+    sdice = res["sdice"]
+    dice = res["dice"]
+    jacc = res["jacc"]
+    areaA_px = res["areaA_px"]
+    areaB_px = res["areaB_px"]
+    inter_px = res["inter_px"]
+    areaA_mm2 = res["areaA_mm2"]
+    areaB_mm2 = res["areaB_mm2"]
+    inter_mm2 = res["inter_mm2"]
+    vol_ratio = res["vol_ratio"]
+    center_dist = res["center_dist"]
+    apl = res["apl"]
 
     g1, g2, g3 = st.columns(3)
     with g1:
@@ -477,16 +550,22 @@ else:
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+    # 1) Surface DICE @ threshold (A as reference)
     ax = axes[0]
     ax.set_title("Surface DICE @ Threshold (A as Reference)", fontweight="bold")
     ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
     ok = dB <= thr
     ax.scatter(pB[ok, 0], pB[ok, 1], c="green", s=12, alpha=0.85, label="B (within tol.)")
     ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red", s=16, alpha=0.9, label="B (outside tol.)")
-    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
+    ax.set_aspect("equal")
+    ax.set_xlim(-10, 10)
+    ax.set_ylim(-10, 10)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right")
 
+    # 2) Surface distance distribution
     ax = axes[1]
     ax.set_title("Surface Distance Distribution", fontweight="bold")
     all_d = np.concatenate([dA, dB])
@@ -497,9 +576,12 @@ else:
     ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f}")
     ax.axvline(hdmax, color="purple", linestyle="--", label=f"Max: {hdmax:.2f}")
     ax.axvline(thr, color="green", linestyle="--", label=f"Thresh: {thr:.2f}")
-    ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+    ax.set_xlabel("Distance (mm)")
+    ax.set_ylabel("Frequency")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
 
+    # 3) DICE overlap with shaded intersection
     ax = axes[2]
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
     for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
@@ -523,9 +605,13 @@ else:
         ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
         first = False
 
-    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
+    ax.set_aspect("equal")
+    ax.set_xlim(-10, 10)
+    ax.set_ylim(-10, 10)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right")
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
