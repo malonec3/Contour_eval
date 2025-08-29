@@ -1,9 +1,9 @@
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-from PIL import Image, ImageOps 
+from PIL import Image
 import os
-import io, base64
+
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
@@ -25,81 +25,49 @@ div.stButton > button { padding: 0.7rem 1.2rem; font-size: 1.05rem; width: 100%;
 </style>
 """, unsafe_allow_html=True)
 
-# Persist last computed plots/metrics so they don't disappear on slider/canvas edits
 st.session_state.setdefault("draw_results", None)
 
-# Canvas & processing settings
-CANVAS_W = 480
-CANVAS_H = 480
-MM_SPAN   = 20.0                    # world extent [-10, +10] mm both axes
-PX_PER_MM = CANVAS_W / MM_SPAN
+# ---------------- base geometry (used for grid / blank) ----------------------
+BASE_W = 480
+BASE_H = 480
+MM_SPAN = 20.0            # world extent [-10, +10] mm
+GRID = (256, 256)
+RESAMPLE_N = 400
 
-GRID = (256, 256)                   # raster grid for masks
-RESAMPLE_N = 400                    # perimeter resampling count
-
-
-# ---- Backgrounds -------------------------------------------------------------
-ASSETS_DIR = "assets"  # change if needed
+# ---------- assets (put your images in ./assets as PNG/JPG) ------------------
+ASSETS_DIR = "assets"
 PELVIS_PATH = os.path.join(ASSETS_DIR, "ct_pelvis.png")
 THORAX_PATH = os.path.join(ASSETS_DIR, "ct_thorax.png")
 
-@st.cache_data(show_spinner=False)
-def load_bg_image(path: str, canvas_w: int, canvas_h: int):
+def load_ct_bg(path: str, target_h: int = 480, max_w: int = 1200):
     """
-    Load a background image, letterbox to exactly (canvas_w, canvas_h) without distortion.
-    Returns a PIL.Image or None if file not found.
+    Load the CT image, resize to target_h (fit vertically) with preserved aspect.
+    Width is scaled from the aspect; if it exceeds max_w it is clamped.
+    Returns a PIL.Image, or None if not found.
     """
     if not path or not os.path.exists(path):
         return None
     img = Image.open(path).convert("RGB")
-    # fit inside canvas, preserve aspect
-    fitted = ImageOps.contain(img, (canvas_w, canvas_h))
-    # paste onto a canvas-sized matte so Fabric receives exact dimensions
-    matte = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
-    matte.paste(fitted, ((canvas_w - fitted.width) // 2, (canvas_h - fitted.height) // 2))
-    return matte
-
-def pil_to_data_url(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
-
-def fabric_image_from_pil(img: Image.Image, w: int, h: int):
-    """Return a Fabric 'image' object JSON sized to the canvas."""
-    if img is None:
-        return None
-    return {
-        "type": "image",
-        "left": 0, "top": 0,
-        "width": float(w), "height": float(h),
-        "scaleX": 1.0, "scaleY": 1.0, "angle": 0, "opacity": 1.0,
-        "crossOrigin": "anonymous",
-        "src": pil_to_data_url(img),
-        "selectable": False, "evented": False, "excludeFromExport": True,
-    }
-
-def infer_canvas_height_for_image(path: str, base_w: int, fallback_h: int) -> int:
-    """Compute canvas height that preserves the CT image aspect ratio (fills vertically)."""
-    try:
-        with Image.open(path) as im:
-            w, h = im.size
-            if w > 0:
-                return max(100, int(round(base_w * (h / w))))  # keep sane minimum
-    except Exception:
-        pass
-    return fallback_h
-
-
+    # scale by height
+    scale = target_h / float(img.height)
+    new_w = int(round(img.width * scale))
+    new_h = target_h
+    # clamp width if needed
+    if new_w > max_w:
+        s = max_w / new_w
+        new_w = int(round(new_w * s))
+        new_h = int(round(new_h * s))
+    return img.resize((new_w, new_h), Image.BILINEAR)
 
 # -----------------------------------------------------------------------------
-# Grid + 10 mm scale as Fabric objects (non-selectable and ignored by extractor)
+# Grid + 10 mm scale as Fabric objects (only for "Grid" background)
 # -----------------------------------------------------------------------------
-def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
-    """Fabric objects for a light grid and a 10 mm scale bar."""
+def grid_objects(width, height, mm_span=MM_SPAN, major=5, minor=1):
+    px_per_mm = width / mm_span
+    step_minor = px_per_mm * minor
+    step_major = px_per_mm * major
+
     objs = []
-    step_minor = PX_PER_MM * minor
-    step_major = PX_PER_MM * major
-
     def add_line(x1,y1,x2,y2, color):
         objs.append({
             "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
@@ -131,7 +99,7 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     })
 
     # 10 mm scale bar (bottom-left)
-    bar_px = 10 * PX_PER_MM; margin = 12.0; y0 = height - margin; x0 = margin
+    bar_px = 10 * px_per_mm; margin = 12.0; y0 = height - margin; x0 = margin
     objs += [
         {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
          "selectable":False,"evented":False,"excludeFromExport":True},
@@ -142,327 +110,185 @@ def grid_objects(width=CANVAS_W, height=CANVAS_H, major=5, minor=1):
     ]
     return objs
 
-GRID_OBJS = grid_objects()
-
 # -----------------------------------------------------------------------------
-# Helpers (with corrected Y orientation)
+# Helpers (unchanged math; they read CANVAS_W/H globals at call time)
 # -----------------------------------------------------------------------------
 def _polygon_points_from_fabric(obj):
-    """Convert a Fabric.js polygon to absolute pixel coordinates."""
-    if obj.get("type") != "polygon":
-        return None
-    pts = obj.get("points")
-    if not pts:
-        return None
-    left   = float(obj.get("left", 0.0))
-    top    = float(obj.get("top", 0.0))
-    sx     = float(obj.get("scaleX", 1.0))
-    sy     = float(obj.get("scaleY", 1.0))
-    po     = obj.get("pathOffset", {"x": 0.0, "y": 0.0})
-    po_x   = float(po.get("x", 0.0))
-    po_y   = float(po.get("y", 0.0))
-
+    if obj.get("type") != "polygon": return None
+    pts = obj.get("points"); if not pts: return None
+    left = float(obj.get("left",0.0)); top = float(obj.get("top",0.0))
+    sx = float(obj.get("scaleX",1.0)); sy = float(obj.get("scaleY",1.0))
+    po = obj.get("pathOffset",{"x":0.0,"y":0.0})
+    po_x = float(po.get("x",0.0)); po_y = float(po.get("y",0.0))
     out = []
     for p in pts:
         x = left + (float(p["x"]) - po_x) * sx
         y = top  + (float(p["y"]) - po_y) * sy
-        out.append((x, y))
+        out.append((x,y))
     arr = np.array(out, dtype=float)
     return arr if len(arr) >= 3 else None
 
-
 def mask_from_canvas(canvas, grid_shape):
-    """Prefer polygons from JSON; fallback to pixel thresholding."""
-    H, W = grid_shape
-    mask = np.zeros((H, W), dtype=bool)
-
+    H,W = grid_shape
+    mask = np.zeros((H,W), dtype=bool)
     jd = canvas.json_data or {}
     objects = jd.get("objects") or []
-
     used_polygon = False
     for obj in objects:
         poly = _polygon_points_from_fabric(obj)
-        if poly is None:
-            continue
+        if poly is None: continue
         used_polygon = True
-        xs = poly[:, 0] / (CANVAS_W - 1) * (W - 1)
-        ys = poly[:, 1] / (CANVAS_H - 1) * (H - 1)
-        rr, cc = skpolygon(ys, xs, shape=(H, W))
-        mask[rr, cc] = True
-
+        xs = poly[:,0] / (CANVAS_W - 1) * (W - 1)
+        ys = poly[:,1] / (CANVAS_H - 1) * (H - 1)
+        rr,cc = skpolygon(ys,xs,shape=(H,W))
+        mask[rr,cc] = True
     if used_polygon:
         mask = morphology.binary_closing(mask, morphology.disk(2))
         mask = ndi.binary_fill_holes(mask)
         mask = morphology.remove_small_objects(mask, 16)
         return mask
-
-    # Fallback (pixel)
     img = canvas.image_data
-    if img is None:
-        return None
-    nonwhite = np.any(img[:, :, :3] < 250, axis=2)
-    zy = H / img.shape[0]
-    zx = W / img.shape[1]
-    mask_small = ndi.zoom(nonwhite.astype(np.uint8), (zy, zx), order=0) > 0
+    if img is None: return None
+    nonwhite = np.any(img[:,:,:3] < 250, axis=2)
+    zy = H / img.shape[0]; zx = W / img.shape[1]
+    mask_small = ndi.zoom(nonwhite.astype(np.uint8),(zy,zx),order=0) > 0
     mask_small = morphology.binary_closing(mask_small, morphology.disk(2))
     mask_small = ndi.binary_fill_holes(mask_small)
     mask_small = morphology.remove_small_objects(mask_small, 16)
     return mask_small
 
-
 def perimeter_points(mask, n_points=RESAMPLE_N):
-    """Resample boundary to n points in **mm** with y flipped upward."""
-    if mask is None or mask.sum() == 0:
-        return np.zeros((0, 2))
+    if mask is None or mask.sum()==0: return np.zeros((0,2))
     cs = measure.find_contours(mask.astype(float), 0.5)
-    if not cs:
-        return np.zeros((0, 2))
+    if not cs: return np.zeros((0,2))
     longest = max(cs, key=lambda c: len(c))
-    if len(longest) < 3:
-        return np.zeros((0, 2))
-
-    diffs = np.diff(longest, axis=0)
-    seglen = np.sqrt((diffs**2).sum(1))
+    if len(longest) < 3: return np.zeros((0,2))
+    diffs = np.diff(longest, axis=0); seglen = np.sqrt((diffs**2).sum(1))
     arclen = np.concatenate([[0], np.cumsum(seglen)])
-    if arclen[-1] == 0:
-        return np.zeros((0, 2))
-
+    if arclen[-1] == 0: return np.zeros((0,2))
     s = np.linspace(0, arclen[-1], n_points, endpoint=False)
-    resampled = np.zeros((n_points, 2), dtype=float)
-    j = 0
-    for i, si in enumerate(s):
-        while j < len(arclen) - 1 and arclen[j + 1] < si:
-            j += 1
-        t = (si - arclen[j]) / max(arclen[j + 1] - arclen[j], 1e-9)
-        resampled[i] = longest[j] * (1 - t) + longest[j + 1] * t
-
-    ys, xs = resampled[:, 0], resampled[:, 1]
-    x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-    y_mm = 10 - (ys / (GRID[0] - 1)) * 20   # flipped so up is positive
+    resampled = np.zeros((n_points,2), dtype=float); j=0
+    for i,si in enumerate(s):
+        while j < len(arclen)-1 and arclen[j+1] < si: j += 1
+        t = (si - arclen[j]) / max(arclen[j+1]-arclen[j], 1e-9)
+        resampled[i] = longest[j]*(1-t) + longest[j+1]*t
+    ys,xs = resampled[:,0], resampled[:,1]
+    x_mm = (xs / (GRID[1]-1)) * 20 - 10
+    y_mm = 10 - (ys / (GRID[0]-1)) * 20
     return np.column_stack([x_mm, y_mm])
 
-
-def nn_distances(P, Q):
-    """Nearest-neighbor distances both ways."""
-    if len(P) == 0 or len(Q) == 0:
-        dP = np.full((len(P),), np.inf)
-        dQ = np.full((len(Q),), np.inf)
-        return dP, dQ
-    kdP, kdQ = cKDTree(P), cKDTree(Q)
+def nn_distances(P,Q):
+    if len(P)==0 or len(Q)==0:
+        return np.full((len(P),),np.inf), np.full((len(Q),),np.inf)
+    kdP,kdQ = cKDTree(P), cKDTree(Q)
     dP = kdQ.query(P, k=1, workers=-1)[0]
     dQ = kdP.query(Q, k=1, workers=-1)[0]
-    return dP, dQ
+    return dP,dQ
 
-
-def dice_jaccard_from_masks(A, B):
+def dice_jaccard_from_masks(A,B):
     A = A.astype(bool); B = B.astype(bool)
-    inter = np.logical_and(A, B).sum()
+    inter = np.logical_and(A,B).sum()
     a = A.sum(); b = B.sum()
     union = a + b - inter
-    dice = (2 * inter) / (a + b) if (a + b) > 0 else 0.0
-    jacc = inter / union if union > 0 else 0.0
-    return dice, jacc, int(a), int(b), int(inter)
-
+    dice = (2*inter)/(a+b) if (a+b)>0 else 0.0
+    jacc = inter/union if union>0 else 0.0
+    return dice,jacc,int(a),int(b),int(inter)
 
 def centroid_mm_from_mask(M):
-    """Centroid of mask in mm coordinates (y up)."""
     idx = np.argwhere(M)
-    if idx.size == 0:
-        return np.array([np.nan, np.nan])
-    r_mean = idx[:, 0].mean()
-    c_mean = idx[:, 1].mean()
-    x_mm = (c_mean / (GRID[1] - 1)) * 20 - 10
-    y_mm = 10 - (r_mean / (GRID[0] - 1)) * 20
-    return np.array([x_mm, y_mm])
-
+    if idx.size==0: return np.array([np.nan,np.nan])
+    r_mean = idx[:,0].mean(); c_mean = idx[:,1].mean()
+    x_mm = (c_mean / (GRID[1]-1)) * 20 - 10
+    y_mm = 10 - (r_mean / (GRID[0]-1)) * 20
+    return np.array([x_mm,y_mm])
 
 def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
-    """
-    Added Path Length along the test perimeter where d_test_to_ref > thr.
-    Approx: sum lengths of edges whose both endpoints are over threshold.
-    """
-    if len(points_test_mm) == 0 or len(d_test_to_ref) == 0:
-        return 0.0
+    if len(points_test_mm)==0 or len(d_test_to_ref)==0: return 0.0
     mask = d_test_to_ref > thr_mm
-    if mask.sum() == 0:
-        return 0.0
-    P = points_test_mm
-    n = len(P)
-    total = 0.0
+    if mask.sum()==0: return 0.0
+    P = points_test_mm; n=len(P); total=0.0
     for i in range(n):
-        j = (i + 1) % n
+        j=(i+1)%n
         if mask[i] and mask[j]:
-            total += float(np.linalg.norm(P[j] - P[i]))
+            total += float(np.linalg.norm(P[j]-P[i]))
     return total
 
-
 # -----------------------------------------------------------------------------
-# Draw/Transform toggle + canvases (side by side, touching)
+# UI / instructions
 # -----------------------------------------------------------------------------
 st.markdown("**PC only - mobile device compatibility is currently under development**")
 st.markdown("""
 ### How to use
-
-1. **Draw A (blue)**  
-   - Make sure **Draw** is selected.  
-   - Click to place points; a **single right-click** (or double-click) closes the loop.  
-   - The grid is in **mm** (minor=1 mm, major=5 mm).
-
-2. **Draw B (red)**  
-   - Do the same in the right canvas.  
-   - Each canvas must contain **one closed contour**.
-
-3. **Transform (optional)**  
-   - Switch to **Transform** to **move/scale/rotate** a contour (drag the handles).  
-   - Use **Draw** again to add more to your contour (Should be done after clicking Go!).
-
-4. **Tune analysis settings**  
-   - Set **Distance Threshold (mm)** and **Percentile for HD** with the sliders.
-
-5. **Run and review**  
-   - Click **Go!** to compute metrics and render plots.  
-   - Plots **stay** while you edit; they only update when you press **Go!** again.  
-   - Use **Clear plots** to remove the current plots.
-
-6. **Canvas toolbar (under each canvas)**  
-   - **Undo / Redo** your last drawing steps.  
-   - **Delete** removes the selected polygon.
-
-**Notes**
-- If you see **“Both contours must be drawn and form closed regions”**, right-click to close the polygon and try again.  
-- In the “Surface DICE @ Threshold” plot, **A is the reference**.  
-- **APL** shown is the length of **B** that lies **outside** the tolerance band around **A**.
+1. **Draw A (blue)** – Click to add points; right-click (or double-click) to close the loop.  
+2. **Draw B (red)** – Same on the right canvas. Each canvas needs one closed loop.  
+3. **Transform (optional)** – Move/scale/rotate the polygon; switch back to Draw to add points.  
+4. **Click Go!** to compute metrics (plots persist until you press Go! again).  
+5. **Undo/Redo/Delete** controls are under each canvas.
 """)
 
-
-
-# Mode toggle
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
-# Background choice
-bg_choice = st.radio(
-    "Canvas background",
-    ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
-    horizontal=True,
-    index=1,   # default to Grid like before
-)
+bg_choice = st.radio("Canvas background",
+                     ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
+                     horizontal=True, index=1)
 
-# Effective canvas size: width is fixed; height adapts for CT images
-BASE_CANVAS_W = CANVAS_W          # keep your chosen width
-BASE_CANVAS_H = CANVAS_H          # default square height
+# ---------- decide canvas sizes + backgrounds (this is the fix) --------------
+TARGET_H = 480   # fit vertically to this height
 
-if bg_choice == "CT: Pelvis" and os.path.exists(PELVIS_PATH):
-    CANVAS_H = infer_canvas_height_for_image(PELVIS_PATH, BASE_CANVAS_W, BASE_CANVAS_H)
-elif bg_choice == "CT: Thorax" and os.path.exists(THORAX_PATH):
-    CANVAS_H = infer_canvas_height_for_image(THORAX_PATH, BASE_CANVAS_W, BASE_CANVAS_H)
-else:
-    CANVAS_H = BASE_CANVAS_H  # None / Grid → default
-
-# Recompute scale-bar spacing for the (possibly) new height
-PX_PER_MM = BASE_CANVAS_W / MM_SPAN
-
-def grid_objects(width=BASE_CANVAS_W, height=CANVAS_H, major=5, minor=1):
-    # (same body as your existing function)
-    objs = []
-    step_minor = PX_PER_MM * minor
-    step_major = PX_PER_MM * major
-    def add_line(x1,y1,x2,y2,color):
-        objs.append({
-            "type":"line","x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
-            "stroke":color,"strokeWidth":1,"selectable":False,"evented":False,
-            "excludeFromExport":True
-        })
-    # minor grid
-    x = 0.0
-    while x <= width + 0.5:
-        add_line(x, 0, x, height, "#ebebeb"); x += step_minor
-    y = 0.0
-    while y <= height + 0.5:
-        add_line(0, y, width, y, "#ebebeb"); y += step_minor
-    # major grid
-    x = 0.0
-    while x <= width + 0.5:
-        add_line(x, 0, x, height, "#d2d2d2"); x += step_major
-    y = 0.0
-    while y <= height + 0.5:
-        add_line(0, y, width, y, "#d2d2d2"); y += step_major
-    # border
-    objs.append({
-        "type":"rect","left":0,"top":0,"width":float(width),"height":float(height),
-        "fill":"","stroke":"#c8c8c8","strokeWidth":1,"selectable":False,"evented":False,
-        "excludeFromExport":True
-    })
-    # 10 mm scale bar (bottom-left)
-    bar_px = 10 * PX_PER_MM; margin = 12.0; y0 = height - margin; x0 = margin
-    objs += [
-        {"type":"line","x1":x0,"y1":y0,"x2":x0+bar_px,"y2":y0,"stroke":"#000","strokeWidth":3,
-         "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0,"y1":y0-6,"x2":x0,"y2":y0+6,"stroke":"#000","strokeWidth":2,
-         "selectable":False,"evented":False,"excludeFromExport":True},
-        {"type":"line","x1":x0+bar_px,"y1":y0-6,"x2":x0+bar_px,"y2":y0+6,"stroke":"#000","strokeWidth":2,
-         "selectable":False,"evented":False,"excludeFromExport":True},
-    ]
-    return objs
-
-# Build initial Fabric objects
-initial_objs = []
+bg_img = None
+initial_overlay = None
 
 if bg_choice == "CT: Pelvis":
-    img = load_bg_image(PELVIS_PATH, BASE_CANVAS_W, CANVAS_H)  # NOTE: pass new height
-    obj = fabric_image_from_pil(img, BASE_CANVAS_W, CANVAS_H)
-    if obj: initial_objs.append(obj)
-
+    bg_img = load_ct_bg(PELVIS_PATH, target_h=TARGET_H)
 elif bg_choice == "CT: Thorax":
-    img = load_bg_image(THORAX_PATH, BASE_CANVAS_W, CANVAS_H)
-    obj = fabric_image_from_pil(img, BASE_CANVAS_W, CANVAS_H)
-    if obj: initial_objs.append(obj)
+    bg_img = load_ct_bg(THORAX_PATH, target_h=TARGET_H)
 
+# Use image dimensions for the canvas when CT is selected
+if bg_img is not None:
+    CANVAS_W, CANVAS_H = bg_img.width, bg_img.height
+    initial_overlay = None            # no grid/scale on CT
 elif bg_choice == "Grid":
-    initial_objs.extend(grid_objects(BASE_CANVAS_W, CANVAS_H))  # grid only
+    CANVAS_W, CANVAS_H = BASE_W, BASE_H
+    initial_overlay = {"objects": grid_objects(CANVAS_W, CANVAS_H)}
+else:  # "None"
+    CANVAS_W, CANVAS_H = BASE_W, BASE_H
+    initial_overlay = None
 
-# No grid overlay by default on CT backgrounds
-initial_drawing = {"objects": initial_objs} if initial_objs else None
-
-
-
-
-# headers
+# -----------------------------------------------------------------------------
+# Side-by-side canvases
+# -----------------------------------------------------------------------------
 hA, hB = st.columns(2)
 with hA: st.subheader("Contour A")
 with hB: st.subheader("Contour B")
 
-# canvases
 colA, colB = st.columns(2)
 with colA:
     canvasA = st_canvas(
         fill_color="rgba(0, 0, 255, 0.20)",
-        stroke_width=2,
-        stroke_color="blue",
+        stroke_width=2, stroke_color="blue",
         background_color="white",
+        background_image=bg_img,             # size == CANVAS_W x CANVAS_H
         update_streamlit=True,
-        height=CANVAS_H, width=BASE_CANVAS_W,
+        height=CANVAS_H, width=CANVAS_W,     # match image exactly -> clicks align
         drawing_mode=drawing_mode,
-        initial_drawing=initial_drawing,  
+        initial_drawing=initial_overlay,
         display_toolbar=True,
         key="canvasA",
     )
-
 with colB:
     canvasB = st_canvas(
         fill_color="rgba(255, 0, 0, 0.20)",
-        stroke_width=2,
-        stroke_color="red",
+        stroke_width=2, stroke_color="red",
         background_color="white",
+        background_image=bg_img,
         update_streamlit=True,
-        height=CANVAS_H, width=BASE_CANVAS_W,
+        height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_drawing,  
+        initial_drawing=initial_overlay,
         display_toolbar=True,
         key="canvasB",
     )
-
-
 
 # -----------------------------------------------------------------------------
 # Controls
@@ -477,7 +303,7 @@ if c2.button("Clear plots", key="clear_btn"):
     st.session_state.draw_results = None
 
 # -----------------------------------------------------------------------------
-# Compute on Go (and persist results)
+# Compute on Go (unchanged below)
 # -----------------------------------------------------------------------------
 if go:
     mA = mask_from_canvas(canvasA, GRID)
@@ -496,30 +322,23 @@ if go:
             dice, jacc, areaA_px, areaB_px, inter_px = dice_jaccard_from_masks(mA, mB)
             dA, dB = nn_distances(pA, pB)
 
-            # Surface metrics
             msd   = (np.mean(dA) + np.mean(dB)) / 2.0
-            hd95  = max(float(np.percentile(dA, perc)),
-                        float(np.percentile(dB, perc)))
+            hd95  = max(float(np.percentile(dA, perc)), float(np.percentile(dB, perc)))
             hdmax = max(float(np.max(dA)), float(np.max(dB)))
             sdice = ((dA <= thr).sum() + (dB <= thr).sum()) / (len(pA) + len(pB))
 
-            # mm^2 areas & intersection
-            dx = 20.0 / (GRID[1] - 1)
-            dy = 20.0 / (GRID[0] - 1)
+            dx = 20.0 / (GRID[1] - 1); dy = 20.0 / (GRID[0] - 1)
             pix_area_mm2 = dx * dy
             areaA_mm2 = float(areaA_px * pix_area_mm2)
             areaB_mm2 = float(areaB_px * pix_area_mm2)
             inter_mm2 = float(inter_px * pix_area_mm2)
 
-            # volume ratio (size similarity)
             vol_ratio = (min(areaA_mm2, areaB_mm2) / max(areaA_mm2, areaB_mm2)) if max(areaA_mm2, areaB_mm2) > 0 else 0.0
 
-            # centroids & center distance (mm)
             cA = centroid_mm_from_mask(mA)
             cB = centroid_mm_from_mask(mB)
             center_dist = float(np.linalg.norm(cA - cB)) if np.all(np.isfinite([*cA, *cB])) else float('nan')
 
-            # Added Path Length (APL) for B relative to A @ thr
             apl = apl_length_mm(pB, dB, thr)
 
             st.session_state.draw_results = dict(
@@ -535,14 +354,13 @@ if go:
             )
 
 # -----------------------------------------------------------------------------
-# Render persisted results (until next Go)
+# Render persisted results (unchanged)
 # -----------------------------------------------------------------------------
 res = st.session_state.draw_results
 if res is None:
     st.info("Draw a closed polygon in each box (use **Draw**). Use **Transform** to tweak it. "
             "Press **Go!** to compute metrics; plots remain until you press Go again.")
 else:
-    # unpack
     thr  = res["thr"];   perc = res["perc"]
     mA   = res["mA"];    mB   = res["mB"]
     pA   = res["pA"];    pB   = res["pB"]
@@ -553,62 +371,33 @@ else:
     areaA_mm2 = res["areaA_mm2"]; areaB_mm2 = res["areaB_mm2"]; inter_mm2 = res["inter_mm2"]
     vol_ratio = res["vol_ratio"]; center_dist = res["center_dist"]; apl = res["apl"]
 
-    # -------------------- Metric groups (3 columns) -------------------------
     g1, g2, g3 = st.columns(3)
-
     with g1:
         st.markdown("### Volumetric Overlap Metrics (Raster)")
-        st.markdown(
-            f"""
-- **DICE Coefficient:** {dice:.4f}  \n
-- **Jaccard Index:** {jacc:.4f}  \n
-- **Volume Ratio:** {vol_ratio:.4f}
-            """
-        )
-
+        st.markdown(f"- **DICE Coefficient:** {dice:.4f}\n- **Jaccard Index:** {jacc:.4f}\n- **Volume Ratio:** {vol_ratio:.4f}")
     with g2:
         st.markdown("### Surface-based Metrics (Sampled Points)")
-        st.markdown(
-            f"""
-- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}  \n
-- **Mean Surface Distance:** {msd:.3f} mm  \n
-- **95th Percentile HD:** {hd95:.3f} mm  \n
-- **Maximum Hausdorff:** {hdmax:.3f} mm
-            """
-        )
-
+        st.markdown(f"- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}\n- **Mean Surface Distance:** {msd:.3f} mm\n- **95th Percentile HD:** {hd95:.3f} mm\n- **Maximum Hausdorff:** {hdmax:.3f} mm")
     with g3:
         st.markdown("### Geometric Properties")
-        st.markdown(
-            f"""
-- **Reference Area (A):** {areaA_mm2:.2f} mm²  \n
-- **Test Area (B):** {areaB_mm2:.2f} mm²  \n
-- **Intersection Area:** {inter_mm2:.2f} mm²  \n
-- **Center-to-Center Distance:** {center_dist:.3f} mm  \n
-- **Added Path Length (APL) @ {thr:.1f} mm:** {apl:.2f} mm
-            """
-        )
+        st.markdown(f"- **Reference Area (A):** {areaA_mm2:.2f} mm²\n- **Test Area (B):** {areaB_mm2:.2f} mm²\n- **Intersection Area:** {inter_mm2:.2f} mm²\n- **Center-to-Center Distance:** {center_dist:.3f} mm\n- **Added Path Length (APL) @ {thr:.1f} mm:** {apl:.2f} mm")
 
-    # -------------------- Visuals (unchanged) -------------------------------
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    # 1) Surface DICE @ threshold (A as reference)
     ax = axes[0]
     ax.set_title("Surface DICE @ Threshold (A as Reference)", fontweight="bold")
-    ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
+    ax.plot(np.append(pA[:,0], pA[0,0]), np.append(pA[:,1], pA[0,1]), "b-", lw=1, label="A")
     ok = dB <= thr
-    ax.scatter(pB[ok, 0],  pB[ok, 1],  c="green", s=12, alpha=0.85, label="B (within tol.)")
-    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red",   s=16, alpha=0.9,  label="B (outside tol.)")
-    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
+    ax.scatter(pB[ok,0], pB[ok,1], c="green", s=12, alpha=0.85, label="B (within tol.)")
+    ax.scatter(pB[~ok,0],pB[~ok,1],c="red", s=16, alpha=0.9,  label="B (outside tol.)")
+    ax.set_aspect("equal"); ax.set_xlim(-10,10); ax.set_ylim(-10,10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
 
-    # 2) Surface distance distribution
     ax = axes[1]
     ax.set_title("Surface Distance Distribution", fontweight="bold")
-    all_d = np.concatenate([dA, dB])
-    maxd = float(np.max(all_d)) if all_d.size > 0 else 1.0
-    bins = np.linspace(0, max(1.0, maxd), 30)
+    all_d = np.concatenate([dA,dB])
+    maxd = float(np.max(all_d)) if all_d.size>0 else 1.0
+    bins = np.linspace(0, max(1.0,maxd), 30)
     ax.hist(all_d, bins=bins, alpha=0.7, color="skyblue", edgecolor="black", label="A↔B")
     ax.axvline(msd,  color="red",    linestyle="--", label=f"Mean: {msd:.2f}")
     ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f}")
@@ -617,42 +406,26 @@ else:
     ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
 
-    # 3) DICE overlap with shaded intersection
     ax = axes[2]
     ax.set_title(f"DICE Overlap Score: {dice:.3f}", fontweight="bold")
-
-    # outlines
-    for mask, color_name, lbl in [(mA, "blue", "A"), (mB, "red", "B")]:
-        cs = measure.find_contours(mask.astype(float), 0.5)
+    for mask, color_name, lbl in [(mA,"blue","A"), (mB,"red","B")]:
+        cs = measure.find_contours(mask.astype(float),0.5)
         if cs:
             longest = max(cs, key=lambda c: len(c))
-            ys, xs = longest[:, 0], longest[:, 1]
-            x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-            y_mm = 10 - (ys / (GRID[0] - 1)) * 20
+            ys, xs = longest[:,0], longest[:,1]
+            x_mm = (xs / (GRID[1]-1)) * 20 - 10
+            y_mm = 10 - (ys / (GRID[0]-1)) * 20
             ax.plot(x_mm, y_mm, color_name, lw=1, label=lbl)
-
-    # shaded intersection
-    inter_mask = np.logical_and(mA, mB)
-    cs_inter = measure.find_contours(inter_mask.astype(float), 0.5)
-    first = True
-    for contour in cs_inter:
-        if len(contour) < 3:
-            continue
-        ys, xs = contour[:, 0], contour[:, 1]
-        x_mm = (xs / (GRID[1] - 1)) * 20 - 10
-        y_mm = 10 - (ys / (GRID[0] - 1)) * 20
-        ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap" if first else None)
-        first = False
-
-    ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
+    inter_mask = np.logical_and(mA,mB)
+    for contour in measure.find_contours(inter_mask.astype(float),0.5):
+        if len(contour) < 3: continue
+        ys, xs = contour[:,0], contour[:,1]
+        x_mm = (xs / (GRID[1]-1)) * 20 - 10
+        y_mm = 10 - (ys / (GRID[0]-1)) * 20
+        ax.fill(x_mm, y_mm, alpha=0.3, color="purple", label="Overlap")
+        break
+    ax.set_aspect("equal"); ax.set_xlim(-10,10); ax.set_ylim(-10,10)
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
-
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
-
-
-
-
-
-
