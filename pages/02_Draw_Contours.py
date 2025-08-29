@@ -281,7 +281,7 @@ def apl_length_mm(points_test_mm, d_test_to_ref, thr_mm):
     return total
 
 # -----------------------------------------------------------------------------
-# Draw/Transform toggle + canvases (side by side, touching)
+# Draw/Transform toggle + canvases
 # -----------------------------------------------------------------------------
 st.markdown("**PC only - mobile device compatibility is currently under development**")
 st.markdown(
@@ -304,6 +304,12 @@ bg_choice = st.radio(
     horizontal=True, index=1
 )
 
+# If CT selected, show a small warning and switch all display units to cm
+ct_mode = bg_choice.startswith("CT:")
+if ct_mode:
+    st.caption("⚠️ CT background is for visual reference only. "
+               "Unit labels below are shown in **cm**; values are not physically calibrated to CT pixel spacing.")
+
 # Build the initial Fabric object list for the canvases
 initial_objs = []
 
@@ -322,7 +328,6 @@ elif bg_choice == "Grid":
     initial_objs = list(GRID_OBJS)
 
 # “None” → leave initial_objs empty (plain white)
-
 initial_objects = {"objects": initial_objs} if initial_objs else None
 
 # headers
@@ -341,7 +346,7 @@ with colA:
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # image or grid (or None)
+        initial_drawing=initial_objects,
         display_toolbar=True,
         key="canvasA",
     )
@@ -355,7 +360,7 @@ with colB:
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,   # image or grid (or None)
+        initial_drawing=initial_objects,
         display_toolbar=True,
         key="canvasB",
     )
@@ -364,7 +369,7 @@ with colB:
 # Controls
 # -----------------------------------------------------------------------------
 st.markdown("---")
-thr  = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)
+thr  = st.slider("Distance Threshold (mm)", 0.0, 5.0, 1.0, 0.1)   # keep slider in mm
 perc = st.slider("Percentile for HD (e.g., 95)", 50.0, 99.9, 95.0, 0.1)
 
 c1, c2, _ = st.columns([1,1,6])
@@ -392,7 +397,7 @@ if go:
             dice, jacc, areaA_px, areaB_px, inter_px = dice_jaccard_from_masks(mA, mB)
             dA, dB = nn_distances(pA, pB)
 
-            # Surface metrics
+            # Surface metrics (in mm internally)
             msd   = (np.mean(dA) + np.mean(dB)) / 2.0
             hd95  = max(float(np.percentile(dA, perc)),
                         float(np.percentile(dB, perc)))
@@ -425,9 +430,8 @@ if go:
                 dA=dA, dB=dB,
                 msd=msd, hd95=hd95, hdmax=hdmax, sdice=sdice,
                 dice=dice, jacc=jacc,
-                areaA_px=areaA_px, areaB_px=areaB_px, inter_px=inter_px,
                 areaA_mm2=areaA_mm2, areaB_mm2=areaB_mm2, inter_mm2=inter_mm2,
-                vol_ratio=vol_ratio, center_dist=center_dist, apl=apl
+                vol_ratio=vol_ratio, center_dist=center_dist, apl=apl,
             )
 
 # -----------------------------------------------------------------------------
@@ -445,9 +449,12 @@ else:
     dA   = res["dA"];    dB   = res["dB"]
     msd  = res["msd"];   hd95 = res["hd95"]; hdmax = res["hdmax"]; sdice = res["sdice"]
     dice = res["dice"];  jacc = res["jacc"]
-    areaA_px = res["areaA_px"]; areaB_px = res["areaB_px"]; inter_px = res["inter_px"]
     areaA_mm2 = res["areaA_mm2"]; areaB_mm2 = res["areaB_mm2"]; inter_mm2 = res["inter_mm2"]
     vol_ratio = res["vol_ratio"]; center_dist = res["center_dist"]; apl = res["apl"]
+
+    # ---- unit labels (display-only) ----
+    lin_unit = "cm" if ct_mode else "mm"
+    area_unit = "cm²" if ct_mode else "mm²"
 
     # -------------------- Metric groups (3 columns) -------------------------
     g1, g2, g3 = st.columns(3)
@@ -466,10 +473,10 @@ else:
         st.markdown("### Surface-based Metrics (Sampled Points)")
         st.markdown(
             f"""
-- **Surface DICE @ {thr:.1f} mm:** {sdice:.4f}  
-- **Mean Surface Distance:** {msd:.3f} mm  
-- **95th Percentile HD:** {hd95:.3f} mm  
-- **Maximum Hausdorff:** {hdmax:.3f} mm
+- **Surface DICE @ {thr:.1f} {lin_unit}:** {sdice:.4f}  
+- **Mean Surface Distance:** {msd:.3f} {lin_unit}  
+- **95th Percentile HD:** {hd95:.3f} {lin_unit}  
+- **Maximum Hausdorff:** {hdmax:.3f} {lin_unit}
             """
         )
 
@@ -477,15 +484,15 @@ else:
         st.markdown("### Geometric Properties")
         st.markdown(
             f"""
-- **Reference Area (A):** {areaA_mm2:.2f} mm²  
-- **Test Area (B):** {areaB_mm2:.2f} mm²  
-- **Intersection Area:** {inter_mm2:.2f} mm²  
-- **Center-to-Center Distance:** {center_dist:.3f} mm  
-- **Added Path Length (APL) @ {thr:.1f} mm:** {apl:.2f} mm
+- **Reference Area (A):** {areaA_mm2:.2f} {area_unit}  
+- **Test Area (B):** {areaB_mm2:.2f} {area_unit}  
+- **Intersection Area:** {inter_mm2:.2f} {area_unit}  
+- **Center-to-Center Distance:** {center_dist:.3f} {lin_unit}  
+- **Added Path Length (APL) @ {thr:.1f} {lin_unit}:** {apl:.2f} {lin_unit}
             """
         )
 
-    # -------------------- Visuals (unchanged) -------------------------------
+    # -------------------- Visuals -------------------------------
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # 1) Surface DICE @ threshold (A as reference)
@@ -493,10 +500,10 @@ else:
     ax.set_title("Surface DICE @ Threshold (A as Reference)", fontweight="bold")
     ax.plot(np.append(pA[:, 0], pA[0, 0]), np.append(pA[:, 1], pA[0, 1]), "b-", lw=1, label="A")
     ok = dB <= thr
-    ax.scatter(pB[ok, 0],  pB[ok, 1],  c="green", s=12, alpha=0.85, label="B (within tol.)")
-    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red",   s=16, alpha=0.9,  label="B (outside tol.)")
+    ax.scatter(pB[ok, 0],  pB[ok, 1],  c="green", s=12, alpha=0.85, label=f"B (within tol.)")
+    ax.scatter(pB[~ok, 0], pB[~ok, 1], c="red",   s=16, alpha=0.9,  label=f"B (outside tol.)")
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+    ax.set_xlabel(f"X ({lin_unit})"); ax.set_ylabel(f"Y ({lin_unit})")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
 
     # 2) Surface distance distribution
@@ -506,11 +513,11 @@ else:
     maxd = float(np.max(all_d)) if all_d.size > 0 else 1.0
     bins = np.linspace(0, max(1.0, maxd), 30)
     ax.hist(all_d, bins=bins, alpha=0.7, color="skyblue", edgecolor="black", label="A↔B")
-    ax.axvline(msd,  color="red",    linestyle="--", label=f"Mean: {msd:.2f}")
-    ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f}")
-    ax.axvline(hdmax,color="purple", linestyle="--", label=f"Max: {hdmax:.2f}")
-    ax.axvline(thr,  color="green",  linestyle="--", label=f"Thresh: {thr:.2f}")
-    ax.set_xlabel("Distance (mm)"); ax.set_ylabel("Frequency")
+    ax.axvline(msd,  color="red",    linestyle="--", label=f"Mean: {msd:.2f} {lin_unit}")
+    ax.axvline(hd95, color="orange", linestyle="--", label=f"HD{int(perc)}: {hd95:.2f} {lin_unit}")
+    ax.axvline(hdmax,color="purple", linestyle="--", label=f"Max: {hdmax:.2f} {lin_unit}")
+    ax.axvline(thr,  color="green",  linestyle="--", label=f"Thresh: {thr:.2f} {lin_unit}")
+    ax.set_xlabel(f"Distance ({lin_unit})"); ax.set_ylabel("Frequency")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
 
     # 3) DICE overlap with shaded intersection
@@ -541,7 +548,7 @@ else:
         first = False
 
     ax.set_aspect("equal"); ax.set_xlim(-10, 10); ax.set_ylim(-10, 10)
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+    ax.set_xlabel(f"X ({lin_unit})"); ax.set_ylabel(f"Y ({lin_unit})")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="upper right")
 
     fig.tight_layout()
