@@ -3,6 +3,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from PIL import Image, ImageOps 
 import os
+import io, base64
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
@@ -57,6 +58,30 @@ def load_bg_image(path: str, canvas_w: int, canvas_h: int):
     matte = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
     matte.paste(fitted, ((canvas_w - fitted.width) // 2, (canvas_h - fitted.height) // 2))
     return matte
+
+def pil_to_data_url(img: Image.Image) -> str:
+    """Encode a PIL image as a data URL for Fabric.js."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+def fabric_image_from_pil(img: Image.Image, w: int, h: int):
+    """Return a Fabric 'image' object JSON sized to the canvas."""
+    if img is None:
+        return None
+    return {
+        "type": "image",
+        "left": 0, "top": 0,
+        "width": float(w), "height": float(h),
+        "scaleX": 1.0, "scaleY": 1.0,
+        "angle": 0,
+        "opacity": 1.0,
+        "crossOrigin": "anonymous",
+        "src": pil_to_data_url(img),
+        "selectable": False, "evented": False,
+        "excludeFromExport": True
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -310,21 +335,33 @@ drawing_mode = "polygon" if mode == "Draw" else "transform"
 bg_choice = st.radio(
     "Canvas background",
     ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
-    horizontal=True,
-    index=1  # start on Grid like today
+    horizontal=True, index=1
 )
 
-# Resolve background_image / initial_drawing based on the choice
-bg_img = None
-initial_objects = None
+show_grid = st.checkbox("Show grid/scale overlay", value=(bg_choice != "None"))
 
-if bg_choice == "Grid":
-    initial_objects = {"objects": GRID_OBJS}
-elif bg_choice == "CT: Pelvis":
-    bg_img = load_bg_image(PELVIS_PATH, CANVAS_W, CANVAS_H)
+# Build the initial Fabric object list for the canvases
+initial_objs = []
+
+if bg_choice == "CT: Pelvis":
+    img = load_bg_image(PELVIS_PATH, CANVAS_W, CANVAS_H)
+    obj = fabric_image_from_pil(img, CANVAS_W, CANVAS_H)
+    if obj: initial_objs.append(obj)
+
 elif bg_choice == "CT: Thorax":
-    bg_img = load_bg_image(THORAX_PATH, CANVAS_W, CANVAS_H)
-# "None" leaves both as None (white background)
+    img = load_bg_image(THORAX_PATH, CANVAS_W, CANVAS_H)
+    obj = fabric_image_from_pil(img, CANVAS_W, CANVAS_H)
+    if obj: initial_objs.append(obj)
+
+# grid overlay (optional)
+if show_grid and (bg_choice != "None"):
+    initial_objs.extend(GRID_OBJS)
+
+# “Grid” without CT image
+if bg_choice == "Grid":
+    initial_objs = list(GRID_OBJS)
+
+initial_objects = {"objects": initial_objs} if initial_objs else None
 
 
 
@@ -340,29 +377,29 @@ with colA:
         fill_color="rgba(0, 0, 255, 0.20)",
         stroke_width=2,
         stroke_color="blue",
-        background_color="white",            
-        background_image=bg_img,             
+        background_color="white",
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,     
+        initial_drawing=initial_objects,   # <-- image/grid live here
         display_toolbar=True,
         key="canvasA",
     )
+
 with colB:
     canvasB = st_canvas(
         fill_color="rgba(255, 0, 0, 0.20)",
         stroke_width=2,
         stroke_color="red",
         background_color="white",
-        background_image=bg_img,             
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing=initial_objects,
+        initial_drawing=initial_objects,   # <-- image/grid live here
         display_toolbar=True,
         key="canvasB",
     )
+
 
 
 # -----------------------------------------------------------------------------
@@ -551,6 +588,7 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
 
 
