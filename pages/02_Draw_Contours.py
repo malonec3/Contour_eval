@@ -1,7 +1,8 @@
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-
+from PIL import Image, ImageOps 
+import os
 from streamlit_drawable_canvas import st_canvas
 from scipy.spatial import cKDTree
 from scipy import ndimage as ndi
@@ -34,6 +35,29 @@ PX_PER_MM = CANVAS_W / MM_SPAN
 
 GRID = (256, 256)                   # raster grid for masks
 RESAMPLE_N = 400                    # perimeter resampling count
+
+
+# ---- Backgrounds -------------------------------------------------------------
+ASSETS_DIR = "assets"  # change if needed
+PELVIS_PATH = os.path.join(ASSETS_DIR, "ct_pelvis.png")
+THORAX_PATH = os.path.join(ASSETS_DIR, "ct_thorax.png")
+
+@st.cache_data(show_spinner=False)
+def load_bg_image(path: str, canvas_w: int, canvas_h: int):
+    """
+    Load a background image, letterbox to exactly (canvas_w, canvas_h) without distortion.
+    Returns a PIL.Image or None if file not found.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    img = Image.open(path).convert("RGB")
+    # fit inside canvas, preserve aspect
+    fitted = ImageOps.contain(img, (canvas_w, canvas_h))
+    # paste onto a canvas-sized matte so Fabric receives exact dimensions
+    matte = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    matte.paste(fitted, ((canvas_w - fitted.width) // 2, (canvas_h - fitted.height) // 2))
+    return matte
+
 
 # -----------------------------------------------------------------------------
 # Grid + 10 mm scale as Fabric objects (non-selectable and ignored by extractor)
@@ -283,6 +307,27 @@ st.markdown("""
 mode = st.radio("", ["Draw", "Transform"], horizontal=True, index=0)
 drawing_mode = "polygon" if mode == "Draw" else "transform"
 
+bg_choice = st.radio(
+    "Canvas background",
+    ["None", "Grid", "CT: Pelvis", "CT: Thorax"],
+    horizontal=True,
+    index=1  # start on Grid like today
+)
+
+# Resolve background_image / initial_drawing based on the choice
+bg_img = None
+initial_objects = None
+
+if bg_choice == "Grid":
+    initial_objects = {"objects": GRID_OBJS}
+elif bg_choice == "CT: Pelvis":
+    bg_img = load_bg_image(PELVIS_PATH, CANVAS_W, CANVAS_H)
+elif bg_choice == "CT: Thorax":
+    bg_img = load_bg_image(THORAX_PATH, CANVAS_W, CANVAS_H)
+# "None" leaves both as None (white background)
+
+
+
 # headers
 hA, hB = st.columns(2)
 with hA: st.subheader("Contour A")
@@ -295,11 +340,12 @@ with colA:
         fill_color="rgba(0, 0, 255, 0.20)",
         stroke_width=2,
         stroke_color="blue",
-        background_color="white",
+        background_color="white",            
+        background_image=bg_img,             
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing={"objects": GRID_OBJS},
+        initial_drawing=initial_objects,     
         display_toolbar=True,
         key="canvasA",
     )
@@ -309,13 +355,15 @@ with colB:
         stroke_width=2,
         stroke_color="red",
         background_color="white",
+        background_image=bg_img,             
         update_streamlit=True,
         height=CANVAS_H, width=CANVAS_W,
         drawing_mode=drawing_mode,
-        initial_drawing={"objects": GRID_OBJS},
+        initial_drawing=initial_objects,
         display_toolbar=True,
         key="canvasB",
     )
+
 
 # -----------------------------------------------------------------------------
 # Controls
@@ -503,6 +551,7 @@ else:
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+
 
 
 
