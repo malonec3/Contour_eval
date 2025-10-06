@@ -562,7 +562,7 @@ Geo. Intersection Area:     {self.metrics.get('intersection_area', np.nan):.2f} 
 Center-to-Center Distance:  {self.metrics.get('center_distance', np.nan):.3f} mm
 Added Path Length (APL):    {self.metrics.get('apl_length', np.nan):.2f} mm (length of test contour outside threshold)
 
-CLINICAL INTERPRETATION GUIDELINES (General):
+INTERPRETATION GUIDELINES (Suggested - not for clinical use):
 ──────────────────────────────────────────────────────────────────
 DICE > 0.8:     Excellent agreement
 DICE 0.7-0.8:   Good agreement
@@ -751,4 +751,5 @@ st.sidebar.download_button(
     mime="text/plain",
     key="export_metrics_btn",
 )
+
 
